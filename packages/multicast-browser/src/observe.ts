@@ -51,7 +51,7 @@ function defaultScope(): BrowserScope {
 /**
  * Query one permission without prompting.
  *
- * Mirrors the deployed IWA probe (`packages/iwa/src/main.ts`). The
+ * Mirrors the deployed IWA probe. The
  * `unsupported`/`unknown` split is load-bearing and must not collapse into
  * `denied`: Chromium throws `TypeError` for permission names it does not
  * implement, and the local-network names have shipped under different spellings
@@ -139,8 +139,8 @@ export interface RawSocketWorkerDiagnostics {
  * different causes, different fixes, and different messages, and the contract
  * has distinct codes for them (`udp-bind-failed` vs `udp-bind-unverified`).
  *
- * The deployed IWA collapses this with `udpBind: diagnostics.udpBind === true`
- * (`packages/iwa/src/main.ts`), which reports a not-yet-attempted bind as a hard
+ * The deployed IWA collapses this with `udpBind: diagnostics.udpBind === true`,
+ * which reports a not-yet-attempted bind as a hard
  * failure. Normalising here rather than there keeps the fix on the adapter
  * boundary every consumer crosses.
  */

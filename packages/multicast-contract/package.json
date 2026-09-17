@@ -19,16 +19,16 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "import": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
     },
     "./conformance": {
-      "import": "./dist/conformance.js",
-      "types": "./dist/conformance.d.ts"
+      "types": "./dist/conformance.d.ts",
+      "import": "./dist/conformance.js"
     },
     "./fake-gateway": {
-      "import": "./dist/fake-gateway.js",
-      "types": "./dist/fake-gateway.d.ts"
+      "types": "./dist/fake-gateway.d.ts",
+      "import": "./dist/fake-gateway.js"
     }
   },
   "files": [

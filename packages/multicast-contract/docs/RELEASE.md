@@ -56,6 +56,35 @@ repository and workflow. **That registration is per-package and per-repository**
 it does not carry over from `libmmt` to this repository, and only an owner of the
 `@blockcast` npm scope can create it.
 
+### The first publish cannot use OIDC — bootstrap before tagging
+
+npm's trusted-publisher settings live on a **package's own settings page**, so a
+publisher cannot be configured for a name that has never been published ("Package
+must exist" is a documented prerequisite; the gap is tracked at
+[npm/cli#8544](https://github.com/npm/cli/issues/8544)). Both names currently
+return **404** on the registry. A tag pushed before bootstrap therefore fails in
+the publish job with `404 OIDC token exchange error - package not found` — and
+npm returns that same 404 for "package missing" and for "no publisher matches",
+so the error will not say which.
+
+The bootstrap is a **one-time human action** by a `@blockcast` scope owner, and
+the ordering matters:
+
+1. Publish each name once **at a throwaway version** (`0.0.0`) with a
+   short-lived granular token — `npx setup-npm-trusted-publish <name>` does
+   exactly this. **Do not bootstrap by tagging `v1.0.0`**: that version is
+   immutable, so a bootstrap that goes wrong spends the release.
+2. Configure the trusted publisher on each package's settings page against
+   `Blockcast/beacon` and workflow **`publish-npm.yml`** (npm matches the
+   workflow *basename*). The publish job declares no `environment:`, so the npm
+   side must not require one either.
+3. Revoke the granular token.
+4. Tag `v1.0.0`. This workflow then publishes unattended, with `--provenance`,
+   and no long-lived secret exists in the repository.
+
+`--provenance` rides on the same OIDC exchange, so it cannot work before step 2
+either.
+
 ## Verifying a release candidate
 
 Run all five against the **packed tarball**, never the repo tree — the tarball is
@@ -66,12 +95,23 @@ the only surface on which "does this ship?" is decidable.
    so every `//` and `/** */` reaches `dist/`, and npm packs `README.md` and
    `package.json` regardless of `files`. npm cannot re-publish a version, so a
    key that ships at `1.0.0` is unfixable.
-2. **No private internals.** `grep -rniE 'libmmt|harbor\.|\.ts\.net'` ⇒ only
-   prose asserting their absence. No `.wasm`/`.so`/`.node` files.
-3. **No dependency edge.** Neither `package.json` declares `dependencies`,
-   `peerDependencies`, or `optionalDependencies`, and neither ships a
-   `workspace:*` specifier. A runtime edge here would drag the unpublished
-   workspace into a public surface.
+2. **No private internals.**
+   `grep -rniE 'libmmt|harbor\.|\.ts\.net|packages/(iwa|extension)/'` ⇒ only
+   prose asserting their absence. No `.wasm`/`.so`/`.node` files. The private
+   monorepo path prefixes are in the expression because JSDoc citing a private
+   source file (`packages/iwa/src/main.ts`) discloses the same structure a
+   `libmmt` mention would. CI runs this exact expression, per member so the
+   error names the file; the two must not drift apart.
+3. **At most one dependency edge, and it is type-only.** The **contract**
+   declares no `dependencies`, `peerDependencies`, or `optionalDependencies` at
+   all. The **adapter** declares exactly one — `@blockcast/multicast-contract`,
+   at a registry semver range — and nothing else; its emitted `.d.ts` name that
+   specifier, so omitting it publishes a package whose types cannot resolve
+   (`TS2307`). Neither manifest may ship a `workspace:*` or `file:` specifier: a
+   runtime edge to anything outside these two packages would drag the
+   unpublished workspace into a public surface. Assert the adapter's edge is
+   type-only on the **emitted JS**, not the manifest — `dist/*.js` must import
+   no bare specifier.
 4. **Cold install.** In an empty directory with no workspace and no private
    checkout, `npm install <both tarballs>` then run the conformance suite from
    the installed package — `runConformanceSuite(new FakeMulticastProvider())`

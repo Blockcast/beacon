@@ -78,10 +78,20 @@ jobs:
               echo "::error::$tgz ships a compiled binary artifact"; exit 1
             fi
 
-            # No internal tracker keys, no private network hostnames.
-            if tar -xOzf "$tgz" | grep -Eq 'BLO-[0-9]+|tailscale'; then
-              echo "::error::$tgz contains an internal tracker key or hostname"; exit 1
-            fi
+            # No internal tracker keys, no private network hostnames, no
+            # private-repo or private-monorepo identifiers. `removeComments` is
+            # unset, so every JSDoc block above an exported declaration reaches
+            # dist/ -- prose is a shipping surface here, not a comment.
+            # This expression is gate 2 of packages/multicast-contract/docs/
+            # RELEASE.md verbatim; the two must not drift apart.
+            # Loop per member so the error names the file, not just the tarball.
+            for member in $(tar -tzf "$tgz" | grep -v '/$'); do
+              if tar -xOzf "$tgz" "$member" \
+                  | grep -EniH --label="$member" \
+                    'BLO-[0-9]+|tailscale|libmmt|harbor\.|\.ts\.net|packages/(iwa|extension)/'; then
+                echo "::error::$tgz ships a private identifier in $member"; exit 1
+              fi
+            done
 
             # A `workspace:` or `file:` spec is published-but-uninstallable.
             manifest="$(tar -xOzf "$tgz" package/package.json)"
@@ -104,14 +114,32 @@ jobs:
       # The contract has no dependencies at all, so the real risk is the
       # adapter: its emitted .d.ts name `@blockcast/multicast-contract`, and if
       # the manifest omits it a consumer installs a package whose types cannot
-      # resolve. Install it from the tarballs alone, outside any workspace.
+      # resolve.
+      #
+      # Install ONLY the adapter tarball. `overrides` supplies the contract from
+      # its tarball if and only if something *requests* it -- i.e. if the
+      # adapter's own manifest declares the dependency. Installing both tarballs
+      # directly would make the contract a root dependency of the probe and pass
+      # whether or not the adapter declares it, which is a different experiment
+      # from the one this step's name claims. Mutation-tested both directions:
+      # manifest with the dependency PASSes, without it FAILs with TS2307.
+      # This keeps the lane registry-free -- neither name is published yet, so
+      # any resolution through registry.npmjs.org would 404.
       - name: Verify the adapter installs and type-resolves standalone
         run: |
           set -euo pipefail
           dir="$(mktemp -d)"
+          contract_tgz="$(echo "$PWD"/npm-packages/blockcast-multicast-contract-*.tgz)"
+          node -e '
+            const fs = require("node:fs");
+            fs.writeFileSync(process.argv[1], JSON.stringify({
+              name: "probe", private: true, type: "module",
+              overrides: { "@blockcast/multicast-contract": `file:${process.argv[2]}` },
+            }));
+          ' "$dir/package.json" "$contract_tgz"
           npm install --prefix "$dir" --no-audit --no-fund \
-            ./npm-packages/blockcast-multicast-browser-*.tgz \
-            ./npm-packages/blockcast-multicast-contract-*.tgz
+            ./npm-packages/blockcast-multicast-browser-*.tgz
+          # Present only because the adapter's manifest asked for it.
           test -d "$dir/node_modules/@blockcast/multicast-contract"
           cat > "$dir/probe.ts" <<'TS'
           import { getGateway } from '@blockcast/multicast-browser';
@@ -147,6 +175,16 @@ jobs:
 
       # Trusted publishing (OIDC) needs npm >= 11.5.1; the pinned Node ships an
       # older npm. No NPM_TOKEN is read anywhere in this workflow.
+      #
+      # PREREQUISITE -- this job CANNOT perform a package's *first* publish.
+      # npm's trusted-publisher settings live on a package's own settings page,
+      # so a publisher cannot exist for a name that has never been published
+      # (npm/cli#8544). Tagging before the one-time bootstrap fails here with
+      # `404 OIDC token exchange error - package not found`, and npm returns
+      # that same 404 for "package missing" and "no publisher matches" -- it
+      # will not tell you which. The bootstrap procedure, and why it must NOT
+      # be done by tagging v1.0.0, is in
+      # packages/multicast-contract/docs/RELEASE.md.
       - name: Update npm
         run: |
           npm install --global npm@11

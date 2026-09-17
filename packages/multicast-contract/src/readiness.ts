@@ -249,7 +249,7 @@ export function evaluateReadiness(
 	// asymmetry between the two live providers is why:
 	//
 	//   - The extension installs `window.multicast` unconditionally at
-	//     document_start (packages/extension/src/inject/inject.ts), knowing
+	//     `document_start`, knowing
 	//     nothing about the IWA. Presence of the global proves nothing, and
 	//     every call then routes through `sendToIWA`, which queues for 15s and
 	//     fails with a generic "IWA bridge not available" if the IWA never

@@ -9,11 +9,12 @@
  *   2. Assemble the `ReadinessObservation` that the contract's pure
  *      `evaluateReadiness` consumes (`./observe.ts`).
  *
- * Zero runtime dependencies, asserted in CI. The contract is consumed
- * type-only, so nothing here ships a copy of the canonical surface and no
- * compiled libmmt artifact is reachable from this package. Subscription
- * semantics, error codes, and the readiness verdict all stay in the frozen leaf;
- * this package only collects facts and hands them over.
+ * The only dependency is the contract, and it is consumed type-only: the
+ * emitted JS imports no bare specifier, so nothing here ships a copy of the
+ * canonical surface and no compiled transport implementation is reachable from
+ * this package. Subscription semantics, error codes, and the readiness verdict
+ * all stay in the frozen leaf; this package only collects facts and hands them
+ * over.
  *
  * Setup prompting is deliberately absent — it remains host UX (ratified in the
  * contract freeze), and a readiness API that probed for itself would pop an IWA

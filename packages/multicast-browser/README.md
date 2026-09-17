@@ -15,14 +15,18 @@ nothing more:
 | Collect the facts `evaluateReadiness` consumes | `observeReadiness` and its parts |
 | Run the contract's conformance suite in a browser realm | `createBrowserConformanceDriver` |
 
-## Zero runtime dependencies
+## One dependency, consumed type-only
 
-Asserted in CI, for the same reason the contract asserts it: this is a public
-surface, and a runtime edge from here would drag the unpublished workspace — and
-eventually a compiled libmmt artifact — into it. The contract is consumed
-**type-only**, so the emitted JS imports no bare specifier at all. A test pins
-that shipped sources use `import type`; the CI lane pins it again on the built
-output.
+`@blockcast/multicast-contract` is the only entry in `dependencies`, and it is
+itself dependency-free. It is declared so that `npm install
+@blockcast/multicast-browser` resolves the types this package's emitted `.d.ts`
+name — without it a consumer gets `TS2307`.
+
+Nothing is imported at runtime: the contract is consumed **type-only**, so the
+emitted JS imports no bare specifier at all. That is what keeps a private
+transport implementation from ever becoming reachable through this public
+surface. A test pins that shipped sources use `import type`; the CI lane pins it
+again on the built output.
 
 ## Usage
 
@@ -83,17 +87,20 @@ provider nobody checked.
 
 ## Build and test
 
-The contract's **declarations** are the type source, so build it first:
+The contract's **declarations** are the type source, so build it first. Run
+these from the repository root:
 
 ```bash
-pnpm --filter @blockcast/multicast-contract build
-cd packages/multicast-browser
-npm install --ignore-scripts   # typescript only
-npm run typecheck
-npm test                       # unit + browser conformance
-npm run build
+npm --prefix packages/multicast-contract install
+npm --prefix packages/multicast-contract run build
+
+# This package's lane is install-free: its `tsconfig.json` path mapping resolves
+# the contract from the sibling package's emitted declarations above, and its
+# tests run on node's own type stripping. That mapping stays — it is what lets
+# the lane build without the contract having to exist on the registry first.
+packages/multicast-contract/node_modules/.bin/tsc -b packages/multicast-browser
+npm --prefix packages/multicast-browser test   # unit + browser conformance
 ```
 
-CI runs exactly this in `.github/workflows/multicast-contract.yml`, after the
-contract's own steps. The `tsconfig.json` path mapping is replaced with a
-published pin when the package is extracted to its public repository.
+CI runs exactly this in [`.github/workflows/publish-npm.yml`](../../.github/workflows/publish-npm.yml),
+after the contract's own steps.
