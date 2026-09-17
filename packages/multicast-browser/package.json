@@ -1,0 +1,50 @@
+{
+  "name": "@blockcast/multicast-browser",
+  "version": "1.0.0",
+  "description": "Browser/extension/IWA adapter for the frozen v1 window.multicast contract: structural provider resolution plus readiness observation collection. Its only dependency is @blockcast/multicast-contract, which is itself dependency-free and consumed type-only.",
+  "homepage": "https://github.com/Blockcast/beacon/tree/main/packages/multicast-browser#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Blockcast/beacon.git",
+    "directory": "packages/multicast-browser"
+  },
+  "bugs": {
+    "url": "https://github.com/Blockcast/beacon/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@blockcast/multicast-contract": "^1.0.0"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test 'src/**/*.test.ts'",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+  },
+  "keywords": [
+    "multicast",
+    "window.multicast",
+    "browser",
+    "iwa",
+    "adapter"
+  ],
+  "author": "Blockcast",
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}

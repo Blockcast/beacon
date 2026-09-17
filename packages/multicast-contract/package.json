@@ -1,0 +1,57 @@
+{
+  "name": "@blockcast/multicast-contract",
+  "version": "1.0.0",
+  "description": "Cycle-breaking leaf package holding the frozen v1 window.multicast contract, its read-only readiness surface, and the executable conformance suite. Zero runtime dependencies by design.",
+  "homepage": "https://github.com/Blockcast/beacon/tree/main/packages/multicast-contract#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Blockcast/beacon.git",
+    "directory": "packages/multicast-contract"
+  },
+  "bugs": {
+    "url": "https://github.com/Blockcast/beacon/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./conformance": {
+      "import": "./dist/conformance.js",
+      "types": "./dist/conformance.d.ts"
+    },
+    "./fake-gateway": {
+      "import": "./dist/fake-gateway.js",
+      "types": "./dist/fake-gateway.d.ts"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "docs:reference": "npm run build && node scripts/gen-reference-api.mjs",
+    "docs:reference:check": "npm run build && node scripts/gen-reference-api.mjs --check",
+    "test": "node --experimental-strip-types --test 'src/**/*.test.ts'",
+    "test:docs": "npm run build && node --test scripts/gen-reference-api.test.mjs",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+  },
+  "keywords": [
+    "multicast",
+    "window.multicast",
+    "conformance",
+    "contract"
+  ],
+  "author": "Blockcast",
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}
