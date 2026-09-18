@@ -84,14 +84,22 @@ jobs:
             # dist/ -- prose is a shipping surface here, not a comment.
             # This expression is gate 2 of packages/multicast-contract/docs/
             # RELEASE.md verbatim; the two must not drift apart.
-            # Loop per member so the error names the file, not just the tarball.
-            for member in $(tar -tzf "$tgz" | grep -v '/$'); do
-              if tar -xOzf "$tgz" "$member" \
-                  | grep -EniH --label="$member" \
-                    'BLO-[0-9]+|tailscale|libmmt|harbor\.|\.ts\.net|packages/(iwa|extension)/'; then
-                echo "::error::$tgz ships a private identifier in $member"; exit 1
-              fi
-            done
+            #
+            # Extract once, then grep the tree -- do NOT pipe `tar -xOzf` per
+            # member into grep inside an `if`. Under pipefail that pipeline
+            # returns non-zero both when nothing matched AND when tar could not
+            # read the member, and `if` takes the clean branch either way: the
+            # gate reports PASS without having looked. Extracting as a plain
+            # command instead lets `set -e` abort on a tar failure, and `grep -r`
+            # still names the offending file.
+            extract="$(mktemp -d)"
+            tar -xzf "$tgz" -C "$extract"
+            if grep -rEni \
+                'BLO-[0-9]+|tailscale|libmmt|harbor\.|\.ts\.net|packages/(iwa|extension)/' \
+                "$extract"; then
+              echo "::error::$tgz ships a private identifier"; exit 1
+            fi
+            rm -rf "$extract"
 
             # A `workspace:` or `file:` spec is published-but-uninstallable.
             manifest="$(tar -xOzf "$tgz" package/package.json)"
@@ -194,6 +202,26 @@ jobs:
         with:
           name: npm-packages
           path: npm-packages
+
+      # The job gates on the tag *prefix* only, then publishes whatever version
+      # is baked into the tarball -- so a `v1.0.1` tag cut without bumping the
+      # manifests republishes 1.0.0. That either fails with a 403 naming a
+      # version nobody typed, or silently ships the tag as the older version,
+      # leaving a tag pointing at a release that does not exist on npm. Neither
+      # is recoverable: these versions are immutable. Two independently
+      # versioned packages ride one `v*` tag, so the tag cannot be
+      # self-describing for both -- assert it against each tarball instead.
+      - name: Assert the tag matches every packed version
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          for tgz in npm-packages/*.tgz; do
+            v="$(tar -xOzf "$tgz" package/package.json \
+                 | node -pe 'JSON.parse(require("fs").readFileSync(0)).version')"
+            [ "$v" = "$tag" ] || {
+              echo "::error::$tgz is $v, tag is $tag"; exit 1
+            }
+          done
 
       # --provenance works here and does NOT in Blockcast/libmmt: npm's registry
       # rejects a sigstore bundle whose source repo is private, and this repo is
