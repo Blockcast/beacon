@@ -71,7 +71,18 @@ jobs:
           set -euo pipefail
           for tgz in npm-packages/*.tgz; do
             echo "=== $tgz ==="
-            tar -tzf "$tgz"
+            # Capture the member list once rather than piping `tar` into a
+            # matcher: `grep -q` exits at the first match, which SIGPIPEs tar,
+            # and under pipefail that aborts the step on a *good* tarball.
+            # A command substitution keeps the fail-closed property instead --
+            # `set -e` aborts the assignment if tar cannot read the archive.
+            members="$(tar -tzf "$tgz")"
+            echo "$members"
+
+            # `files: ["dist"]` packs an empty package silently when the build
+            # produced no dist/ -- listing members does not assert one is there.
+            grep -q '^package/dist/' <<<"$members" \
+              || { echo "::error::$tgz has no package/dist/"; exit 1; }
 
             # No private source, no compiled native/wasm artifact.
             if tar -tzf "$tgz" | grep -Ei '\.(wasm|so|node|dylib|a)$'; then
