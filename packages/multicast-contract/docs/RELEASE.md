@@ -49,7 +49,7 @@ mtimes), so a recorded SHA-256 is a checkable claim about the source, not an
 accident of when it was packed. Verify by packing twice before recording.
 
 Publication itself runs through npm **Trusted Publishing (OIDC)** — the same
-mechanism the provider library's repository uses for `@blockcast/mmt-transport`:
+mechanism `Blockcast/libmmt` uses for `@blockcast/mmt-transport`:
 a hosted runner, `permissions: id-token: write`, and a trusted publisher
 registered on npmjs.com against the publishing repository and workflow.
 **That registration is per-package and per-repository**; it does not carry over
