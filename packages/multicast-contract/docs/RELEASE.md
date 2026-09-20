@@ -49,12 +49,12 @@ mtimes), so a recorded SHA-256 is a checkable claim about the source, not an
 accident of when it was packed. Verify by packing twice before recording.
 
 Publication itself runs through npm **Trusted Publishing (OIDC)** — the same
-mechanism `Blockcast/libmmt` uses for `@blockcast/mmt-transport` in
-`.github/workflows/publish-npm.yml`: a hosted runner, `permissions: id-token:
-write`, and a trusted publisher registered on npmjs.com against the publishing
-repository and workflow. **That registration is per-package and per-repository**;
-it does not carry over from `libmmt` to this repository, and only an owner of the
-`@blockcast` npm scope can create it.
+mechanism the provider library's repository uses for `@blockcast/mmt-transport`:
+a hosted runner, `permissions: id-token: write`, and a trusted publisher
+registered on npmjs.com against the publishing repository and workflow.
+**That registration is per-package and per-repository**; it does not carry over
+from that repository to this one, and only an owner of the `@blockcast` npm
+scope can create it.
 
 ### The first publish cannot use OIDC — bootstrap before tagging
 
@@ -95,13 +95,19 @@ the only surface on which "does this ship?" is decidable.
    so every `//` and `/** */` reaches `dist/`, and npm packs `README.md` and
    `package.json` regardless of `files`. npm cannot re-publish a version, so a
    key that ships at `1.0.0` is unfixable.
-2. **No private internals.**
-   `grep -rniE 'libmmt|harbor\.|\.ts\.net|packages/(iwa|extension)/'` ⇒ only
-   prose asserting their absence. No `.wasm`/`.so`/`.node` files. The private
-   monorepo path prefixes are in the expression because JSDoc citing a private
-   source file (`packages/iwa/src/main.ts`) discloses the same structure a
-   `libmmt` mention would. CI runs this exact expression, per member so the
-   error names the file; the two must not drift apart.
+2. **No private internals.** `grep -rEni -f .github/privacy-patterns.txt` ⇒ 0
+   hits. No `.wasm`/`.so`/`.node` files. That file is the single
+   private-identifier set: the provider repository's name, internal registry
+   and network hostnames, and the private monorepo's path prefixes — a JSDoc
+   block citing a private source path discloses the same structure a repository
+   name would. Both gates read that one file, so they cannot drift apart: the
+   tarball gate in the `build` job (which adds `BLO-[0-9]+` inline, a
+   tarball-only rule — the repo tree carries tracker keys on purpose, an
+   immutable published tarball must not), and the `privacy` job, which runs the
+   same set over the **working tree**. The two surfaces are different: this
+   repository is public, and `files: ["dist"]` keeps `docs/`, tests and
+   `.github/` out of every tarball, so the tarball gate cannot see a leak in
+   this very file.
 3. **At most one dependency edge, and it is type-only.** The **contract**
    declares no `dependencies`, `peerDependencies`, or `optionalDependencies` at
    all. The **adapter** declares exactly one — `@blockcast/multicast-contract`,
@@ -124,12 +130,12 @@ the only surface on which "does this ship?" is decidable.
    a non-clean result there is a documentation obligation, not a release stop,
    unless the collision reaches a consumer transitively.
 
-Record, alongside the artifact SHA-256s, the **`libmmt` submodule SHA of the tree
-the release was cut from**. Every crate in `libmmt` — `mmt-ffi`, `mmt-core`,
-`mmt-wasm`, `mmt-fec`, `mmt-container` — reads `version = "0.1.0"` and is not
-bumped, so the crate semver carries no information and the gitlink SHA is the
-only identifier of the compiled ABI. Neither published package contains any
-`libmmt` code; the pin identifies the **provider** side these consumers talk to.
+Record, alongside the artifact SHA-256s, the **provider library's submodule SHA
+for the tree the release was cut from**. Every crate in that submodule reads
+`version = "0.1.0"` and is never bumped, so the crate semver carries no
+information and the gitlink SHA is the only identifier of the compiled ABI.
+Neither published package contains any provider code; the pin identifies the
+**provider** side these consumers talk to.
 
 ## Rollback
 

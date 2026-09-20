@@ -167,16 +167,22 @@ describe('each check fails on a provider that violates its guarantee', () => {
 	});
 
 	/**
-	 * One case per coordinate. `tailscale` is NOT declared on the public
+	 * One case per coordinate. The mesh member is NOT declared on the public
 	 * `TransportCapabilityReport` any more (BLO-33832) — which is exactly why it
 	 * needs a test: the type says the field cannot exist, the runtime says it
 	 * can, and the check has to believe the runtime. The `as unknown as` hop
 	 * models a provider structurally assigning an internal report.
+	 *
+	 * The member name is deliberately generic. `assertCapabilitiesRedacted`
+	 * walks `Object.entries(transports)` and never matches on names, so the name
+	 * is incidental to what is asserted here — and this repo is public, so
+	 * naming the real mesh vendor would disclose private infrastructure for no
+	 * test coverage (BLO-34928). Do not "restore" it.
 	 */
 	for (const [label, member, key, value, pattern] of [
 		['an AMT relay address', 'amt', 'relay', '198.51.100.7', /transports\.amt\.relay/],
 		['a WHIP endpoint', 'whip', 'endpoint', 'https://whip.example/ingest', /transports\.whip\.endpoint/],
-		['a mesh peer address the public type no longer declares', 'tailscale', 'peer', '100.64.0.7', /transports\.tailscale\.peer/],
+		['a mesh peer address the public type no longer declares', 'meshPeer', 'peer', '100.64.0.7', /transports\.meshPeer\.peer/],
 	] as const) {
 		test(`redaction catches ${label}`, () => {
 			const leaky = {

@@ -8,11 +8,12 @@ on:
   workflow_dispatch:
 
 # Node is pinned to an exact release, never the bare range '24' (the reasoning
-# is recorded in Blockcast/libmmt's publish-npm.yml under BLO-32366): '24' is a
-# semver RANGE, so setup-node resolves it from whatever the runner image's tool
-# cache happens to hold, and the runtime is then chosen by an image rebuilt
-# weekly rather than by this repo. 24.14.0-24.18.1 abort the process outright on
-# an empty MaybeLocal in the native cjs-module-lexer; 24.19.0+ are fixed.
+# was first recorded in the provider repository's publish workflow, under
+# BLO-32366): '24' is a semver RANGE, so setup-node resolves it from whatever
+# the runner image's tool cache happens to hold, and the runtime is then chosen
+# by an image rebuilt weekly rather than by this repo. 24.14.0-24.18.1 abort the
+# process outright on an empty MaybeLocal in the native cjs-module-lexer;
+# 24.19.0+ are fixed.
 env:
   NODE_VERSION: "24.20.0"
 
@@ -93,8 +94,13 @@ jobs:
             # private-repo or private-monorepo identifiers. `removeComments` is
             # unset, so every JSDoc block above an exported declaration reaches
             # dist/ -- prose is a shipping surface here, not a comment.
-            # This expression is gate 2 of packages/multicast-contract/docs/
-            # RELEASE.md verbatim; the two must not drift apart.
+            #
+            # The private-identifier set lives in .github/privacy-patterns.txt,
+            # shared with the `privacy` job below and quoted by gate 2 of
+            # packages/multicast-contract/docs/RELEASE.md, so the three cannot
+            # drift apart. `BLO-` stays inline: it is a tarball-only rule (the
+            # repo tree carries tracker keys on purpose; an immutable published
+            # tarball must not).
             #
             # Extract once, then grep the tree -- do NOT pipe `tar -xOzf` per
             # member into grep inside an `if`. Under pipefail that pipeline
@@ -105,8 +111,11 @@ jobs:
             # still names the offending file.
             extract="$(mktemp -d)"
             tar -xzf "$tgz" -C "$extract"
-            if grep -rEni \
-                'BLO-[0-9]+|tailscale|libmmt|harbor\.|\.ts\.net|packages/(iwa|extension)/' \
+            # Same fail-open shape one level up: `grep -f` on a missing or
+            # empty pattern file matches nothing and reports PASS.
+            [ -s .github/privacy-patterns.txt ] \
+              || { echo "::error::.github/privacy-patterns.txt is missing or empty"; exit 1; }
+            if grep -rEni -e 'BLO-[0-9]+' -f .github/privacy-patterns.txt \
                 "$extract"; then
               echo "::error::$tgz ships a private identifier"; exit 1
             fi
@@ -179,6 +188,54 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # Repo-surface privacy gate. This repository is PUBLIC; the tarball gate in
+  # `build` is structurally incapable of seeing this surface, because both
+  # packages declare `files: ["dist"]`, so docs/, src/*.test.ts and .github/
+  # never enter a tarball. Anything that leaks here leaks on an anonymous
+  # `git clone` / raw.githubusercontent.com read regardless of what ships.
+  # Scoped to the working tree on purpose -- the tarball gate stays the
+  # artifact-surface check and is deliberately NOT this mechanism.
+  privacy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: No private identifiers on the public repo surface
+        run: |
+          set -euo pipefail
+          patterns=.github/privacy-patterns.txt
+
+          # Every line is an ERE alternative -- no comments, no blank lines (a
+          # blank line matches everything). An absent or empty file makes
+          # `grep -f` match nothing and report PASS without having looked.
+          [ -s "$patterns" ] || { echo "::error::$patterns is missing or empty"; exit 1; }
+
+          # `if grep ...` takes the clean branch on rc=1 (no match) AND on
+          # rc>=2 (grep itself failed) -- fail-open. Branch on the code.
+          # The pattern file is excluded because it necessarily contains
+          # every token it searches for; nothing else is exempt, so prose
+          # reintroduced anywhere -- including in this workflow -- is caught.
+          set +e
+          hits="$(grep -rEni -f "$patterns" \
+                    --exclude-dir=.git --exclude-dir=node_modules \
+                    --exclude=privacy-patterns.txt .)"
+          rc=$?
+          set -e
+
+          case "$rc" in
+            0)
+              echo "$hits"
+              echo "::error::private identifier on the public repo surface"
+              exit 1 ;;
+            1)
+              echo "clean: no private identifiers in the working tree" ;;
+            *)
+              echo "::error::grep failed (rc=$rc) -- gate did not run"
+              exit 1 ;;
+          esac
+
   publish:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
@@ -234,9 +291,10 @@ jobs:
             }
           done
 
-      # --provenance works here and does NOT in Blockcast/libmmt: npm's registry
-      # rejects a sigstore bundle whose source repo is private, and this repo is
-      # public. It links the npm page to the exact commit and workflow run.
+      # --provenance works here and does NOT in the provider repository: npm's
+      # registry rejects a sigstore bundle whose source repo is private, and
+      # this repo is public. It links the npm page to the exact commit and
+      # workflow run.
       #
       # Contract first: the adapter depends on it, and npm publish is not
       # transactional, so a partial failure should leave a dependency without
