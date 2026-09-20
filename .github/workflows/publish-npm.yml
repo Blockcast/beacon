@@ -1,0 +1,248 @@
+name: Publish to npm
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+# Node is pinned to an exact release, never the bare range '24' (the reasoning
+# is recorded in Blockcast/libmmt's publish-npm.yml under BLO-32366): '24' is a
+# semver RANGE, so setup-node resolves it from whatever the runner image's tool
+# cache happens to hold, and the runtime is then chosen by an image rebuilt
+# weekly rather than by this repo. 24.14.0-24.18.1 abort the process outright on
+# an empty MaybeLocal in the native cjs-module-lexer; 24.19.0+ are fixed.
+env:
+  NODE_VERSION: "24.20.0"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # Build order matters and is not incidental: multicast-browser resolves
+      # the contract from its sibling's emitted declarations (tsconfig `paths` +
+      # project reference), not from node_modules, so the contract's dist has to
+      # exist first. See packages/multicast-browser/tsconfig.json.
+      - name: Build and test the contract
+        working-directory: packages/multicast-contract
+        run: |
+          npm install --include=dev --no-audit --no-fund
+          npm run build
+          npm test
+          npm run docs:reference:check
+
+      - name: Build and test the browser adapter
+        working-directory: packages/multicast-browser
+        run: |
+          # No `npm install` here, on purpose. This lane is install-free by
+          # design: the contract is resolved from the sibling package's emitted
+          # declarations (tsconfig `paths` + project reference), and the tests
+          # run on node's own type stripping. Running `npm install` would make
+          # CI resolve the declared "@blockcast/multicast-contract": "^1.0.0"
+          # against the registry, which is a bootstrap deadlock -- that manifest
+          # entry exists for CONSUMERS, and before the first publish it 404s,
+          # so a green build would be impossible until after the publish it is
+          # supposed to gate. The standalone-install job below is what actually
+          # proves the declared dependency resolves.
+          ../multicast-contract/node_modules/.bin/tsc -b
+          npm test
+
+      - name: Pack release artifacts
+        run: |
+          mkdir npm-packages
+          npm pack ./packages/multicast-contract --pack-destination npm-packages
+          npm pack ./packages/multicast-browser --pack-destination npm-packages
+          ls -l npm-packages
+
+      # Asserted on the packed tarballs, never on the repo tree: what ships is
+      # the tarball, and `files` / .npmignore decide which of the two you are
+      # actually looking at.
+      - name: Verify tarball contents
+        run: |
+          set -euo pipefail
+          for tgz in npm-packages/*.tgz; do
+            echo "=== $tgz ==="
+            # Capture the member list once rather than piping `tar` into a
+            # matcher: `grep -q` exits at the first match, which SIGPIPEs tar,
+            # and under pipefail that aborts the step on a *good* tarball.
+            # A command substitution keeps the fail-closed property instead --
+            # `set -e` aborts the assignment if tar cannot read the archive.
+            members="$(tar -tzf "$tgz")"
+            echo "$members"
+
+            # `files: ["dist"]` packs an empty package silently when the build
+            # produced no dist/ -- listing members does not assert one is there.
+            grep -q '^package/dist/' <<<"$members" \
+              || { echo "::error::$tgz has no package/dist/"; exit 1; }
+
+            # No private source, no compiled native/wasm artifact.
+            if tar -tzf "$tgz" | grep -Ei '\.(wasm|so|node|dylib|a)$'; then
+              echo "::error::$tgz ships a compiled binary artifact"; exit 1
+            fi
+
+            # No internal tracker keys, no private network hostnames, no
+            # private-repo or private-monorepo identifiers. `removeComments` is
+            # unset, so every JSDoc block above an exported declaration reaches
+            # dist/ -- prose is a shipping surface here, not a comment.
+            # This expression is gate 2 of packages/multicast-contract/docs/
+            # RELEASE.md verbatim; the two must not drift apart.
+            #
+            # Extract once, then grep the tree -- do NOT pipe `tar -xOzf` per
+            # member into grep inside an `if`. Under pipefail that pipeline
+            # returns non-zero both when nothing matched AND when tar could not
+            # read the member, and `if` takes the clean branch either way: the
+            # gate reports PASS without having looked. Extracting as a plain
+            # command instead lets `set -e` abort on a tar failure, and `grep -r`
+            # still names the offending file.
+            extract="$(mktemp -d)"
+            tar -xzf "$tgz" -C "$extract"
+            if grep -rEni \
+                'BLO-[0-9]+|tailscale|libmmt|harbor\.|\.ts\.net|packages/(iwa|extension)/' \
+                "$extract"; then
+              echo "::error::$tgz ships a private identifier"; exit 1
+            fi
+            rm -rf "$extract"
+
+            # A `workspace:` or `file:` spec is published-but-uninstallable.
+            manifest="$(tar -xOzf "$tgz" package/package.json)"
+            if grep -Eq '"(workspace|file):' <<<"$manifest"; then
+              echo "::error::$tgz manifest declares a workspace:/file: dependency"; exit 1
+            fi
+            node -e '
+              const pkg = JSON.parse(process.argv[1]);
+              if (pkg.publishConfig?.access !== "public") {
+                console.error(`::error::${pkg.name} does not set publishConfig.access=public`);
+                process.exit(1);
+              }
+              if (!pkg.repository?.url?.includes("Blockcast/beacon")) {
+                console.error(`::error::${pkg.name} does not point repository at Blockcast/beacon`);
+                process.exit(1);
+              }
+            ' "$manifest"
+          done
+
+      # The contract has no dependencies at all, so the real risk is the
+      # adapter: its emitted .d.ts name `@blockcast/multicast-contract`, and if
+      # the manifest omits it a consumer installs a package whose types cannot
+      # resolve.
+      #
+      # Install ONLY the adapter tarball. `overrides` supplies the contract from
+      # its tarball if and only if something *requests* it -- i.e. if the
+      # adapter's own manifest declares the dependency. Installing both tarballs
+      # directly would make the contract a root dependency of the probe and pass
+      # whether or not the adapter declares it, which is a different experiment
+      # from the one this step's name claims. Mutation-tested both directions:
+      # manifest with the dependency PASSes, without it FAILs with TS2307.
+      # This keeps the lane registry-free -- neither name is published yet, so
+      # any resolution through registry.npmjs.org would 404.
+      - name: Verify the adapter installs and type-resolves standalone
+        run: |
+          set -euo pipefail
+          dir="$(mktemp -d)"
+          contract_tgz="$(echo "$PWD"/npm-packages/blockcast-multicast-contract-*.tgz)"
+          node -e '
+            const fs = require("node:fs");
+            fs.writeFileSync(process.argv[1], JSON.stringify({
+              name: "probe", private: true, type: "module",
+              overrides: { "@blockcast/multicast-contract": `file:${process.argv[2]}` },
+            }));
+          ' "$dir/package.json" "$contract_tgz"
+          npm install --prefix "$dir" --no-audit --no-fund \
+            ./npm-packages/blockcast-multicast-browser-*.tgz
+          # Present only because the adapter's manifest asked for it.
+          test -d "$dir/node_modules/@blockcast/multicast-contract"
+          cat > "$dir/probe.ts" <<'TS'
+          import { getGateway } from '@blockcast/multicast-browser';
+          const gateway = getGateway();
+          export const ready: boolean = gateway !== null;
+          TS
+          npm install --prefix "$dir" --no-audit --no-fund typescript@5.9.3
+          # skipLibCheck:false on purpose -- this is the check that catches an
+          # unresolvable type import inside the shipped declarations.
+          "$dir/node_modules/.bin/tsc" --noEmit --strict --skipLibCheck false \
+            --module nodenext --moduleResolution nodenext --target ES2022 \
+            --lib ES2022,DOM "$dir/probe.ts"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-packages
+          path: npm-packages/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: "https://registry.npmjs.org/"
+
+      # Trusted publishing (OIDC) needs npm >= 11.5.1; the pinned Node ships an
+      # older npm. No NPM_TOKEN is read anywhere in this workflow.
+      #
+      # PREREQUISITE -- this job CANNOT perform a package's *first* publish.
+      # npm's trusted-publisher settings live on a package's own settings page,
+      # so a publisher cannot exist for a name that has never been published
+      # (npm/cli#8544). Tagging before the one-time bootstrap fails here with
+      # `404 OIDC token exchange error - package not found`, and npm returns
+      # that same 404 for "package missing" and "no publisher matches" -- it
+      # will not tell you which. The bootstrap procedure, and why it must NOT
+      # be done by tagging v1.0.0, is in
+      # packages/multicast-contract/docs/RELEASE.md.
+      - name: Update npm
+        run: |
+          npm install --global npm@11
+          npm --version
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-packages
+          path: npm-packages
+
+      # The job gates on the tag *prefix* only, then publishes whatever version
+      # is baked into the tarball -- so a `v1.0.1` tag cut without bumping the
+      # manifests republishes 1.0.0. That either fails with a 403 naming a
+      # version nobody typed, or silently ships the tag as the older version,
+      # leaving a tag pointing at a release that does not exist on npm. Neither
+      # is recoverable: these versions are immutable. Two independently
+      # versioned packages ride one `v*` tag, so the tag cannot be
+      # self-describing for both -- assert it against each tarball instead.
+      - name: Assert the tag matches every packed version
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          for tgz in npm-packages/*.tgz; do
+            v="$(tar -xOzf "$tgz" package/package.json \
+                 | node -pe 'JSON.parse(require("fs").readFileSync(0)).version')"
+            [ "$v" = "$tag" ] || {
+              echo "::error::$tgz is $v, tag is $tag"; exit 1
+            }
+          done
+
+      # --provenance works here and does NOT in Blockcast/libmmt: npm's registry
+      # rejects a sigstore bundle whose source repo is private, and this repo is
+      # public. It links the npm page to the exact commit and workflow run.
+      #
+      # Contract first: the adapter depends on it, and npm publish is not
+      # transactional, so a partial failure should leave a dependency without
+      # its dependent rather than a dependent that cannot resolve.
+      - name: Publish @blockcast/multicast-contract
+        run: npm publish ./npm-packages/blockcast-multicast-contract-*.tgz --access public --provenance
+
+      - name: Publish @blockcast/multicast-browser
+        run: npm publish ./npm-packages/blockcast-multicast-browser-*.tgz --access public --provenance

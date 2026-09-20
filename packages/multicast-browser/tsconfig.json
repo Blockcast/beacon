@@ -1,0 +1,53 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    "declaration": true,
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "composite": true,
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "moduleResolution": "node",
+    "resolveJsonModule": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+    // The contract is consumed TYPE-ONLY, and in-repo it is resolved from the
+    // sibling package's emitted declarations rather than from node_modules.
+    // That keeps this lane install-free and lockfile-free exactly like the
+    // contract's own lane. `.d.ts` inputs are exempt from the `rootDir` check,
+    // which source files are not — so build the contract first
+    // (`npm --prefix ../multicast-contract run build`) before typechecking here.
+    //
+    // This mapping stays after the extraction into Blockcast/beacon. The two
+    // packages are released together from one tag, so building against the
+    // registry copy would either resolve a stale previously-published contract
+    // or, before the first release, fail outright because the package does not
+    // exist yet. The mapping is build-time only; it does not reach consumers.
+    "paths": {
+      "@blockcast/multicast-contract": ["../multicast-contract/dist/index.d.ts"],
+      "@blockcast/multicast-contract/conformance": [
+        "../multicast-contract/dist/conformance.d.ts"
+      ]
+    }
+  },
+  // Project reference, not a substitute for the package dependency: `tsc -b`
+  // builds the contract before this package so the `paths` mapping above
+  // resolves against a dist that exists.
+  //
+  // package.json DOES declare "@blockcast/multicast-contract": "^1.0.0", and
+  // must: the emitted dist/*.d.ts here carry `import type` statements naming
+  // that specifier, so a consumer who installs only this package would
+  // otherwise get unresolvable types. The two mechanisms answer different
+  // questions — this one builds the repo, that one ships a resolvable package.
+  "references": [{ "path": "../multicast-contract" }],
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist", "src/**/*.test.ts"]
+}
