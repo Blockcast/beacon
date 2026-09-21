@@ -19,7 +19,10 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # Build/test is node-only and can use the on-prem lightweight ARC pool.
+    # Keep publish on GitHub-hosted below: npm trusted publishing currently
+    # requires a cloud-hosted runner for OIDC.
+    runs-on: arc-light
     permissions:
       contents: read
     steps:
@@ -196,7 +199,7 @@ jobs:
   # Scoped to the working tree on purpose -- the tarball gate stays the
   # artifact-surface check and is deliberately NOT this mechanism.
   privacy:
-    runs-on: ubuntu-latest
+    runs-on: arc-light
     permissions:
       contents: read
     steps:
