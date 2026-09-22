@@ -19,10 +19,19 @@ env:
 
 jobs:
   build:
-    # Build/test is node-only and can use the on-prem lightweight ARC pool.
+    # Build/test is node-only and can use the on-prem lightweight ARC pool --
+    # but ONLY for code a collaborator pushed. This repository is PUBLIC with
+    # forking enabled, and this job runs `npm install` (arbitrary lifecycle
+    # scripts) plus build/test from the PR head's own tree. A fork PR on a
+    # self-hosted runner therefore executes attacker-controlled code inside the
+    # on-prem network, and the default fork-approval gate only covers a
+    # contributor's FIRST pull request. Fork PRs go to a disposable hosted
+    # runner instead; everything else (same-repo PRs, push, tags) is trusted
+    # code and keeps the ARC pool.
+    #
     # Keep publish on GitHub-hosted below: npm trusted publishing currently
     # requires a cloud-hosted runner for OIDC.
-    runs-on: arc-light
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'arc-light' }}
     permissions:
       contents: read
     steps:
@@ -199,7 +208,9 @@ jobs:
   # Scoped to the working tree on purpose -- the tarball gate stays the
   # artifact-surface check and is deliberately NOT this mechanism.
   privacy:
-    runs-on: arc-light
+    # Same fork reasoning as `build` above: public repo + self-hosted pool +
+    # `pull_request` would run a fork's tree on on-prem infrastructure.
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'arc-light' }}
     permissions:
       contents: read
     steps:
@@ -214,30 +225,50 @@ jobs:
           # blank line matches everything). An absent or empty file makes
           # `grep -f` match nothing and report PASS without having looked.
           [ -s "$patterns" ] || { echo "::error::$patterns is missing or empty"; exit 1; }
+          # A blank line is fail-CLOSED (it matches every line), but the failure
+          # reads as "the entire repo is a leak". Say what actually happened.
+          if grep -qE '^[[:space:]]*$' "$patterns"; then
+            echo "::error::$patterns has a blank line, which matches everything"; exit 1
+          fi
 
           # `if grep ...` takes the clean branch on rc=1 (no match) AND on
           # rc>=2 (grep itself failed) -- fail-open. Branch on the code.
-          # The pattern file is excluded because it necessarily contains
-          # every token it searches for; nothing else is exempt, so prose
-          # reintroduced anywhere -- including in this workflow -- is caught.
           set +e
           hits="$(grep -rEni -f "$patterns" \
-                    --exclude-dir=.git --exclude-dir=node_modules \
-                    --exclude=privacy-patterns.txt .)"
+                    --exclude-dir=.git --exclude-dir=node_modules .)"
           rc=$?
           set -e
 
           case "$rc" in
-            0)
-              echo "$hits"
-              echo "::error::private identifier on the public repo surface"
-              exit 1 ;;
-            1)
-              echo "clean: no private identifiers in the working tree" ;;
+            0|1) ;;
             *)
               echo "::error::grep failed (rc=$rc) -- gate did not run"
               exit 1 ;;
           esac
+
+          # The pattern file necessarily contains every token it searches for,
+          # so it is the one exemption -- as a PATH, not a name. `--exclude=`
+          # is a basename glob: it would have exempted a file called
+          # privacy-patterns.txt anywhere in the tree, so the exemption could
+          # be widened by adding a file rather than by editing this workflow.
+          # Nothing else is exempt: prose reintroduced anywhere, including in
+          # this workflow, is caught.
+          #
+          # `(\./)?` is load-bearing, not defensive noise. GNU grep prints
+          # `./path` when searching `.`; ugrep (and a BSD/`rg` alias, which a
+          # releaser running this by hand may well have) prints `path`. An
+          # anchor on `^\./` alone silently stops exempting the pattern file
+          # and the gate fails on a clean tree -- caught by mutation-testing
+          # this exact command, where the BASELINE went red.
+          hits="$(printf '%s\n' "$hits" \
+                    | grep -vE '^(\./)?\.github/privacy-patterns\.txt:' || true)"
+
+          if [ -n "$hits" ]; then
+            echo "$hits"
+            echo "::error::private identifier on the public repo surface"
+            exit 1
+          fi
+          echo "clean: no private identifiers in the working tree"
 
   publish:
     needs: build

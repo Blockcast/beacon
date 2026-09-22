@@ -87,27 +87,57 @@ either.
 
 ## Verifying a release candidate
 
-Run all five against the **packed tarball**, never the repo tree — the tarball is
-the only surface on which "does this ship?" is decidable.
+Run all five against the **packed tarball** — the tarball is the only surface on
+which "does this ship?" is decidable. Gate 2 additionally has a repo-tree half,
+because this repository is public: `files: ["dist"]` means a leak in `docs/` or
+`.github/` ships to nobody and discloses to everybody. The two halves are
+separate commands against separate surfaces, and neither substitutes for the
+other.
 
 1. **No internal tracker keys.** `tar -xzf` the tarball and
    `grep -rnE 'BLO-[0-9]+'` the extraction ⇒ 0 hits. `removeComments` is unset,
    so every `//` and `/** */` reaches `dist/`, and npm packs `README.md` and
    `package.json` regardless of `files`. npm cannot re-publish a version, so a
    key that ships at `1.0.0` is unfixable.
-2. **No private internals.** `grep -rEni -f .github/privacy-patterns.txt` ⇒ 0
-   hits. No `.wasm`/`.so`/`.node` files. That file is the single
+2. **No private internals.** On the extracted tarball, run the tarball gate's
+   own command — the `build` job's, verbatim, including its target operand:
+
+   ```sh
+   grep -rEni -e 'BLO-[0-9]+' -f .github/privacy-patterns.txt "$extract"   # => 0 hits
+   ```
+
+   Also no `.wasm`/`.so`/`.node` files. That file is the single
    private-identifier set: the provider repository's name, internal registry
    and network hostnames, and the private monorepo's path prefixes — a JSDoc
    block citing a private source path discloses the same structure a repository
-   name would. Both gates read that one file, so they cannot drift apart: the
-   tarball gate in the `build` job (which adds `BLO-[0-9]+` inline, a
+   name would.
+
+   The repo tree is a **second, disjoint** surface, checked by the `privacy`
+   job. Do not run the command above against `.`: with no target operand
+   `grep -r` searches the working tree, where the pattern file matches itself,
+   so it reports 2 hits and can never read 0. The repo-tree command is the
+   `privacy` job's, also verbatim, and it exempts that one **path** rather than
+   that one basename — `--exclude=` is a basename glob, so it would have
+   exempted any file so named anywhere in the tree:
+
+   ```sh
+   grep -rEni -f .github/privacy-patterns.txt \
+     --exclude-dir=.git --exclude-dir=node_modules . \
+     | grep -vE '^(\./)?\.github/privacy-patterns\.txt:'                    # => 0 hits
+   ```
+
+   `(\./)?` is required because GNU grep prints `./path` when searching `.`
+   while ugrep and some `grep` aliases print `path`; anchoring on `^\./` alone
+   makes this report a leak on a clean tree.
+
+   Both gates read the same pattern file, and both commands are quoted here
+   exactly as CI runs them, so the pattern set and the invocation can drift
+   apart in neither direction. The `build` gate adds `BLO-[0-9]+` inline, a
    tarball-only rule — the repo tree carries tracker keys on purpose, an
-   immutable published tarball must not), and the `privacy` job, which runs the
-   same set over the **working tree**. The two surfaces are different: this
-   repository is public, and `files: ["dist"]` keeps `docs/`, tests and
-   `.github/` out of every tarball, so the tarball gate cannot see a leak in
-   this very file.
+   immutable published tarball must not. The two surfaces are genuinely
+   different: this repository is public, and `files: ["dist"]` keeps `docs/`,
+   tests and `.github/` out of every tarball, so the tarball gate cannot see a
+   leak in this very file.
 3. **At most one dependency edge, and it is type-only.** The **contract**
    declares no `dependencies`, `peerDependencies`, or `optionalDependencies` at
    all. The **adapter** declares exactly one — `@blockcast/multicast-contract`,
