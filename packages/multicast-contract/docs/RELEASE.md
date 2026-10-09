@@ -73,9 +73,10 @@ Two cheap readings separate them, and both were needed to diagnose the failed
   missing" is ruled out and the 404 on `PUT` is about the publisher binding.
   Both `@blockcast/multicast-contract` and `@blockcast/multicast-browser` have
   returned 200 at `0.0.0` since the 2026-09-19 bootstrap.
-- **Read the `npm verb oidc` lines in the publish job.** The publish steps run
-  `--loglevel verbose` precisely so these appear: every OIDC failure path in
-  npm's `lib/utils/oidc.js` is `log.verbose`/`log.silly` and then a silent
+- **Read the `npm verb oidc` / `npm sill oidc` lines in the publish job.** The
+  publish steps run `--loglevel silly` precisely so these appear: every OIDC
+  failure path in npm's `lib/utils/oidc.js` is `log.verbose`/`log.silly` (two
+  of the three are silly, which `verbose` would hide) and then a silent
   `return undefined`, so at npm's default `notice` loglevel a rejected exchange
   looks identical to one never attempted. `Failed token exchange request with
   body message: …` carries the registry's own reason.

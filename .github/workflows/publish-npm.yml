@@ -349,7 +349,7 @@ jobs:
       # transactional, so a partial failure should leave a dependency without
       # its dependent rather than a dependent that cannot resolve.
       #
-      # `--loglevel verbose` is not noise-for-its-own-sake, it is the only way
+      # `--loglevel silly` is not noise-for-its-own-sake, it is the only way
       # this job can say WHY a trusted publish failed. Every failure path in
       # npm's lib/utils/oidc.js -- no id_token, bad permissions, and above all
       # `Failed token exchange request with body message: <registry's own
@@ -359,12 +359,15 @@ jobs:
       # never attempted, and the publish fails several steps later with an
       # error about something else. Run 37862130628 emitted zero `npm verb`
       # lines for exactly this reason and cost a round-trip to a human who had
-      # no way to tell which trusted-publisher field was wrong. Verbose prints
-      # the registry's own rejection message; it does not print credentials
+      # no way to tell which trusted-publisher field was wrong. It must be
+      # `silly`, not `verbose`: of those three paths only the token-exchange
+      # failure logs at verbose; no id_token and bad permissions log at silly.
+      # Silly prints the registry's own rejection message; it does not print
+      # credentials
       # (the exchanged token is logged only as "Successfully retrieved and set
       # token").
       - name: Publish @blockcast/multicast-contract
-        run: npm publish ./npm-packages/blockcast-multicast-contract-*.tgz --access public --provenance --loglevel verbose
+        run: npm publish ./npm-packages/blockcast-multicast-contract-*.tgz --access public --provenance --loglevel silly
 
       - name: Publish @blockcast/multicast-browser
-        run: npm publish ./npm-packages/blockcast-multicast-browser-*.tgz --access public --provenance --loglevel verbose
+        run: npm publish ./npm-packages/blockcast-multicast-browser-*.tgz --access public --provenance --loglevel silly
