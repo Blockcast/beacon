@@ -62,9 +62,10 @@ npm's trusted-publisher settings live on a **package's own settings page**, so a
 publisher cannot be configured for a name that has never been published ("Package
 must exist" is a documented prerequisite; the gap is tracked at
 [npm/cli#8544](https://github.com/npm/cli/issues/8544)). A tag pushed before
-bootstrap therefore fails in the publish job with `404 OIDC token exchange error
-- package not found` — and npm returns that same 404 for "package missing" and
-for "no publisher matches", so **the error text alone will not say which.**
+bootstrap therefore fails in the publish job with
+`404 OIDC token exchange error - package not found` — and npm returns that same
+404 for "package missing" and for "no publisher matches", so **the error text
+alone will not say which.**
 
 Two cheap readings separate them, and both were needed to diagnose the failed
 `v1.0.0` attempt ([run 37862130628](https://github.com/Blockcast/beacon/actions/runs/37862130628)):
