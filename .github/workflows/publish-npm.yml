@@ -278,10 +278,25 @@ jobs:
       contents: read
       id-token: write
     steps:
+      # No `registry-url:` here, deliberately. It is the setup-node input that
+      # looks like it configures the registry and actually configures a
+      # CREDENTIAL: it writes ~/_temp/.npmrc with
+      # `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}` and exports
+      # NODE_AUTH_TOKEN as the literal placeholder `XXXXX-XXXXX-XXXXX-XXXXX`
+      # when no token secret is supplied -- which is always, here, because this
+      # workflow reads no NPM_TOKEN anywhere. So a trusted-publishing job that
+      # sets it hands npm a junk bearer token to fall back on the moment the
+      # OIDC exchange fails, and the registry answers the resulting PUT with a
+      # 404 (it masks 401 as 404 on a scoped name to avoid leaking existence).
+      # That is the misleading `E404 ... PUT` on run 37862130628, under tag
+      # v1.0.0: it reads as "no trusted publisher matches" but is really "npm
+      # authenticated as nobody". Without the input there is no .npmrc and no
+      # fallback credential, so a failed exchange surfaces as a plain auth
+      # error. The registry itself is unchanged -- npm's built-in default is
+      # registry.npmjs.org and neither manifest sets publishConfig.registry.
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          registry-url: "https://registry.npmjs.org/"
 
       # Trusted publishing (OIDC) needs npm >= 11.5.1; the pinned Node ships an
       # older npm. No NPM_TOKEN is read anywhere in this workflow.
@@ -333,8 +348,23 @@ jobs:
       # Contract first: the adapter depends on it, and npm publish is not
       # transactional, so a partial failure should leave a dependency without
       # its dependent rather than a dependent that cannot resolve.
+      #
+      # `--loglevel verbose` is not noise-for-its-own-sake, it is the only way
+      # this job can say WHY a trusted publish failed. Every failure path in
+      # npm's lib/utils/oidc.js -- no id_token, bad permissions, and above all
+      # `Failed token exchange request with body message: <registry's own
+      # message>` -- is log.verbose/log.silly followed by a silent
+      # `return undefined`. npm's default loglevel is `notice`, so at the
+      # default a rejected exchange is indistinguishable from one that was
+      # never attempted, and the publish fails several steps later with an
+      # error about something else. Run 37862130628 emitted zero `npm verb`
+      # lines for exactly this reason and cost a round-trip to a human who had
+      # no way to tell which trusted-publisher field was wrong. Verbose prints
+      # the registry's own rejection message; it does not print credentials
+      # (the exchanged token is logged only as "Successfully retrieved and set
+      # token").
       - name: Publish @blockcast/multicast-contract
-        run: npm publish ./npm-packages/blockcast-multicast-contract-*.tgz --access public --provenance
+        run: npm publish ./npm-packages/blockcast-multicast-contract-*.tgz --access public --provenance --loglevel verbose
 
       - name: Publish @blockcast/multicast-browser
-        run: npm publish ./npm-packages/blockcast-multicast-browser-*.tgz --access public --provenance
+        run: npm publish ./npm-packages/blockcast-multicast-browser-*.tgz --access public --provenance --loglevel verbose

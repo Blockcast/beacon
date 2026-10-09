@@ -61,11 +61,24 @@ scope can create it.
 npm's trusted-publisher settings live on a **package's own settings page**, so a
 publisher cannot be configured for a name that has never been published ("Package
 must exist" is a documented prerequisite; the gap is tracked at
-[npm/cli#8544](https://github.com/npm/cli/issues/8544)). Both names currently
-return **404** on the registry. A tag pushed before bootstrap therefore fails in
-the publish job with `404 OIDC token exchange error - package not found` — and
-npm returns that same 404 for "package missing" and for "no publisher matches",
-so the error will not say which.
+[npm/cli#8544](https://github.com/npm/cli/issues/8544)). A tag pushed before
+bootstrap therefore fails in the publish job with `404 OIDC token exchange error
+- package not found` — and npm returns that same 404 for "package missing" and
+for "no publisher matches", so **the error text alone will not say which.**
+
+Two cheap readings separate them, and both were needed to diagnose the failed
+`v1.0.0` attempt ([run 37862130628](https://github.com/Blockcast/beacon/actions/runs/37862130628)):
+
+- **`GET` the name unauthenticated.** 200 means the name exists, so "package
+  missing" is ruled out and the 404 on `PUT` is about the publisher binding.
+  Both `@blockcast/multicast-contract` and `@blockcast/multicast-browser` have
+  returned 200 at `0.0.0` since the 2026-09-19 bootstrap.
+- **Read the `npm verb oidc` lines in the publish job.** The publish steps run
+  `--loglevel verbose` precisely so these appear: every OIDC failure path in
+  npm's `lib/utils/oidc.js` is `log.verbose`/`log.silly` and then a silent
+  `return undefined`, so at npm's default `notice` loglevel a rejected exchange
+  looks identical to one never attempted. `Failed token exchange request with
+  body message: …` carries the registry's own reason.
 
 The bootstrap is a **one-time human action** by a `@blockcast` scope owner, and
 the ordering matters:
