@@ -64,3 +64,16 @@ The sidecar must be initialized before `start()`. Recovery uses the parser's
 FTI geometry and exact `[SBN, ESI]` payload IDs, then stores the reconstructed
 object at its FDT `contentLocation`; old route.wasm builds simply skip this
 optional path.
+
+The browser E2E test uses the checked-out ATSC 3 parser, the real
+`fec-raptorq` WASM module, and Shaka's test CMAF assets. It drops one source
+symbol from an HLS segment, verifies exact recovery, then plays DASH and HLS
+through the cache for both native DIMT and AMT subscription configurations:
+
+```sh
+npm run test:e2e
+```
+
+Set `PMG_ROOT`, `ROUTE_WASM`, `ROUTE_WASM_EXEC`, `RAPTORQ_JS`, `RAPTORQ_WASM`,
+`SHAKA_JS`, `MEDIA_ROOT`, or `PLAYWRIGHT` when those artifacts live outside the
+adjacent `pim-multicast-gateway` checkout.
