@@ -10,6 +10,7 @@ contract, its executable conformance suite, and the platform adapters
 | --- | --- |
 | [`@blockcast/multicast-contract`](packages/multicast-contract) | the frozen v1 contract, its read-only readiness surface, and the executable conformance suite. No dependencies. |
 | [`@blockcast/multicast-browser`](packages/multicast-browser) | browser / extension / IWA adapter: structural provider resolution and readiness observation. Depends only on the contract, and consumes it type-only. |
+| [`@blockcast/mabr-route-proxy`](packages/mabr-route-proxy) | tiny native multicast/AMT ROUTE handoff for DASH/HLS CMAF objects; lets Shaka keep its normal segment URLs. |
 
 iOS and Android adapters are not in this repository yet.
 
@@ -17,6 +18,9 @@ iOS and Android adapters are not in this repository yet.
 
 ```sh
 npm install @blockcast/multicast-browser
+
+# Optional DASH/HLS mABR handoff
+npm install @blockcast/mabr-route-proxy
 ```
 
 That pulls `@blockcast/multicast-contract` with it. Install the contract alone

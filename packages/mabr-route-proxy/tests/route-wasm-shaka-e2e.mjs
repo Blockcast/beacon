@@ -1,0 +1,250 @@
+// Real route.wasm -> mABR fetch proxy -> Shaka playback test.
+//
+// The test is intentionally outside the default unit-test command because it
+// needs a TinyGo route.wasm, fec-raptorq wasm-bindgen artifacts, and a browser:
+//
+//   ROUTE_WASM=/data/scratch/route-rq.wasm \
+//   ROUTE_WASM_EXEC=/data/scratch/wasm_exec.js \
+//   npm run test:e2e
+//
+// It feeds the real parser through the same bytes subscription used by
+// window.multicast, drops one RaptorQ source symbol, and verifies that the
+// recovered object plus DASH and HLS CMAF objects are consumed by Shaka.
+import assert from 'node:assert/strict';
+import http from 'node:http';
+import { readFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const pimRoot = process.env.PMG_ROOT || resolve(packageRoot, '../../../pim-multicast-gateway');
+const routeWasmPath = process.env.ROUTE_WASM || join(pimRoot, 'packages/atsc3-tuner-bridge/wasm/route.wasm');
+const routeExecPath = process.env.ROUTE_WASM_EXEC || join(pimRoot, 'packages/atsc3-tuner-bridge/wasm/wasm_exec.js');
+const raptorqJsPath = process.env.RAPTORQ_JS || join(pimRoot, 'packages/atsc3-tuner-bridge/wasm/raptorq-pkg/raptorq_wasm.js');
+const raptorqWasmPath = process.env.RAPTORQ_WASM || join(pimRoot, 'packages/atsc3-tuner-bridge/wasm/raptorq-pkg/raptorq_wasm_bg.wasm');
+const shakaPath = process.env.SHAKA_JS || join(pimRoot, 'shaka-player/dist/shaka-player.compiled.debug.js');
+const assetsRoot = process.env.MEDIA_ROOT || join(pimRoot, 'shaka-player/test/test/assets');
+const playwrightPath = process.env.PLAYWRIGHT || join(pimRoot, 'node_modules/playwright/index.mjs');
+
+const routeWasm = readFileSync(routeWasmPath);
+const wasmExec = readFileSync(routeExecPath);
+const raptorqJs = readFileSync(raptorqJsPath);
+const raptorqWasm = readFileSync(raptorqWasmPath);
+const shaka = readFileSync(shakaPath, 'utf8');
+const files = new Map([
+  ['dash/dash.mpd', join(assetsRoot, 'dash-vr/dash.mpd')],
+  ['dash/init.mp4', join(assetsRoot, 'dash-vr/init.mp4')],
+  ...Array.from({ length: 6 }, (_, index) => [`dash/segment_${index}.m4s`, join(assetsRoot, `dash-vr/segment_${index}.m4s`)]),
+  ['hls/media.m3u8', join(assetsRoot, 'hls-muxed-mp4-ts/mp4.m3u8')],
+  ['hls/init.mp4', join(assetsRoot, 'hls-muxed-mp4-ts/init.mp4')],
+  ['hls/000000000.m4s', join(assetsRoot, 'hls-muxed-mp4-ts/000000000.m4s')],
+]);
+const dataByLocation = new Map([...files].map(([location, path]) => [location, readFileSync(path)]));
+const encoded = Object.fromEntries([...dataByLocation].map(([location, data]) => [location, data.toString('base64')]));
+const contentType = (location) => location.endsWith('.mpd')
+  ? 'application/dash+xml'
+  : location.endsWith('.m3u8')
+    ? 'application/vnd.apple.mpegurl'
+    : location.endsWith('.m4s')
+      ? 'video/iso.segment'
+      : 'video/mp4';
+const fdt = `<?xml version="1.0"?><FDT-Instance>${[...dataByLocation.keys()]
+  .map((location, index) => `<File TOI="${index + 1}" Content-Location="${location}" Content-Type="${contentType(location)}" Transfer-Length="${dataByLocation.get(location).byteLength}"/>`)
+  .join('')}<File TOI="12" Content-Location="dash/recovered.m4s" Content-Type="video/iso.segment" Transfer-Length="1000"/></FDT-Instance>`;
+
+const page = `<!doctype html><meta charset=utf-8><video id=v muted playsinline></video>
+<script>
+if (!Map.prototype.getOrInsertComputed) Map.prototype.getOrInsertComputed = function (key, factory) { if (!this.has(key)) this.set(key, factory(key)); return this.get(key); };
+window.__assets = ${JSON.stringify(encoded)};
+window.__fdt = ${JSON.stringify(fdt)};
+window.__shaka = ${JSON.stringify(shaka)};
+window.__log = [];
+</script>
+<script src="/wasm_exec.js"></script>
+<script type="module">
+const log = (value) => window.__log.push(String(value));
+const assets = window.__assets;
+const encoder = new TextEncoder();
+const { createRouteMabrSession } = await import('/mabr-route-proxy.js');
+const rqModule = await import('/rq/raptorq_wasm.js');
+await rqModule.default('/rq/raptorq_wasm_bg.wasm');
+const routeBytes = await (await fetch('/route.wasm')).arrayBuffer();
+const go = new Go();
+const instantiated = await WebAssembly.instantiate(routeBytes, go.importObject);
+go.run(instantiated.instance);
+const routeExports = instantiated.instance.exports;
+routeExports.route_init();
+let deliver;
+const gateway = {
+  subscribe: async () => ({
+    addEventListener: (_type, callback) => { deliver = callback; },
+    removeEventListener: () => {},
+    unsubscribe: async () => {},
+  }),
+};
+const session = createRouteMabrSession({
+  gateway,
+  wasm: { exports: routeExports },
+  ingress: 'native',
+  group: '239.21.4.1',
+  port: 5004,
+  baseUrl: location.origin + '/mabr/',
+  raptorq: {
+    wasm: { RaptorQDecoder: rqModule.RaptorQDecoder },
+    onRecovered: (object) => log('RaptorQ recovered ' + object.contentLocation + ' ' + object.data.length),
+  },
+});
+await session.start();
+session.installFetch();
+const send = (packet) => deliver({ detail: packet.buffer });
+function lct(toi, codePoint, closeObject, payload, extension = new Uint8Array()) {
+  const headerLength = 16 + extension.length;
+  const packet = new Uint8Array(headerLength + payload.length);
+  const view = new DataView(packet.buffer);
+  const word1 = (1 << 12) | (1 << 7) | (1 << 5) | (closeObject ? 1 : 0);
+  view.setUint16(0, word1, false);
+  view.setUint16(2, ((headerLength / 4) << 8) | codePoint, false);
+  view.setUint32(4, 0, false);
+  view.setUint32(8, 0, false);
+  view.setUint32(12, toi, false);
+  packet.set(extension, 16);
+  packet.set(payload, headerLength);
+  return packet;
+}
+function compactFti(transferLength, symbolLength) {
+  const extension = new Uint8Array(16);
+  const view = new DataView(extension.buffer);
+  extension[0] = 64;
+  extension[1] = 4;
+  view.setUint32(2, Math.floor(transferLength / 0x100000000), false);
+  view.setUint32(6, transferLength >>> 0, false);
+  view.setUint16(10, symbolLength, false);
+  view.setUint32(12, transferLength, false);
+  return extension;
+}
+function raptorqFti(transferLength, symbolLength, maxSourceBlockLength, maxEncodingSymbols) {
+  const extension = new Uint8Array(28);
+  const view = new DataView(extension.buffer);
+  extension[0] = 64;
+  extension[1] = 7;
+  const high = Math.floor(transferLength / 0x1000000);
+  view.setUint16(2, high, false);
+  view.setUint32(4, (transferLength << 8) >>> 0, false);
+  view.setUint16(8, symbolLength, false);
+  view.setUint32(10, (1 << 24) | (1 << 8) | 8, false);
+  view.setUint16(14, 0, false);
+  view.setUint32(16, maxSourceBlockLength, false);
+  view.setUint32(20, maxEncodingSymbols, false);
+  return extension;
+}
+function sendObject(toi, codePoint, data) {
+  const packetSize = 1200;
+  for (let offset = 0; offset < data.length; offset += packetSize) {
+    const part = data.subarray(offset, Math.min(offset + packetSize, data.length));
+    const payloadId = new Uint8Array(4);
+    new DataView(payloadId.buffer).setUint32(0, offset, false);
+    send(lct(toi, codePoint, offset + part.length === data.length, new Uint8Array([...payloadId, ...part]), offset === 0 ? compactFti(data.length, 1) : undefined));
+  }
+}
+
+// The existing ROUTE parser consumes the FDT and all CMAF objects. No player
+// URL is sent over HTTP; the proxy is populated by completed ROUTE objects.
+send(lct(0, 0, true, new Uint8Array([0, 0, 0, 0, ...encoder.encode(window.__fdt)])));
+for (const [location, base64] of Object.entries(assets)) {
+  sendObject(Object.keys(assets).indexOf(location) + 1, location.endsWith('.mpd') || location.endsWith('.m3u8') ? 3 : location.endsWith('init.mp4') ? 5 : 8, Uint8Array.from(atob(base64), (value) => value.charCodeAt(0)));
+}
+
+// Build a real RFC 6330 codeword, drop one source symbol, and feed the repair
+// symbols through route.wasm's encoding-6 queue.
+const recovered = Uint8Array.from({ length: 1000 }, (_, index) => (index * 17 + 3) & 255);
+const fecEncoder = new rqModule.RaptorQEncoder(recovered, 128, 4, 1, 1, 8);
+const sourcePackets = fecEncoder.get_source_packets(0);
+const repairPackets = fecEncoder.get_repair_packets(0, 0, 4);
+const fecPacketSize = fecEncoder.packet_size();
+const maxSourceBlockLength = sourcePackets.length / fecPacketSize;
+const maxEncodingSymbols = maxSourceBlockLength + repairPackets.length / fecPacketSize;
+const sendRaptorQ = (blob, skipSourceIndex = -1) => {
+  for (let offset = 0, index = 0; offset < blob.length; offset += fecPacketSize, index++) {
+    if (index === skipSourceIndex) continue;
+    const symbol = blob.slice(offset, offset + fecPacketSize);
+    send(lct(12, 8, false, new Uint8Array([...raptorqFti(recovered.length, 128, maxSourceBlockLength, maxEncodingSymbols), ...symbol])));
+  }
+};
+sendRaptorQ(sourcePackets, 1);
+sendRaptorQ(repairPackets);
+const recoveredResponse = await session.fetch(location.origin + '/mabr/dash/recovered.m4s');
+if (recoveredResponse.status !== 200) throw new Error('recovered object status=' + recoveredResponse.status);
+const recoveredBytes = new Uint8Array(await recoveredResponse.arrayBuffer());
+if (recoveredBytes.length !== recovered.length || recoveredBytes.some((value, index) => value !== recovered[index])) throw new Error('recovered object bytes mismatch');
+log('RaptorQ fetch verified');
+
+const shakaScript = document.createElement('script');
+shakaScript.text = window.__shaka;
+document.head.append(shakaScript);
+const player = new shaka.Player(document.querySelector('#v'));
+async function play(url, label) {
+  await player.load(url);
+  await document.querySelector('#v').play();
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+  const video = document.querySelector('#v');
+  log(label + ':readyState=' + video.readyState + ',buffered=' + video.buffered.length);
+  if (video.readyState < 2 || video.buffered.length < 1) throw new Error(label + ' did not decode buffered media');
+  await player.unload();
+}
+await play(location.origin + '/mabr/dash/dash.mpd', 'DASH');
+await play(location.origin + '/mabr/hls/media.m3u8', 'HLS');
+window.__done = true;
+</script>`;
+
+const requests = [];
+const server = http.createServer((request, response) => {
+  const path = request.url?.split('?')[0] || '/';
+  requests.push(path);
+  if (path === '/') {
+    response.writeHead(200, { 'content-type': 'text/html' });
+    response.end(page);
+  } else if (path === '/route.wasm') {
+    response.writeHead(200, { 'content-type': 'application/wasm' });
+    response.end(routeWasm);
+  } else if (path === '/wasm_exec.js') {
+    response.writeHead(200, { 'content-type': 'text/javascript' });
+    response.end(wasmExec);
+  } else if (path === '/rq/raptorq_wasm.js') {
+    response.writeHead(200, { 'content-type': 'text/javascript' });
+    response.end(raptorqJs);
+  } else if (path === '/rq/raptorq_wasm_bg.wasm') {
+    response.writeHead(200, { 'content-type': 'application/wasm' });
+    response.end(raptorqWasm);
+  } else if (path === '/mabr-route-proxy.js') {
+    response.writeHead(200, { 'content-type': 'text/javascript' });
+    response.end(readFileSync(join(packageRoot, 'dist/index.js')));
+  } else {
+    response.writeHead(404);
+    response.end('network miss');
+  }
+});
+
+const { chromium } = await import(pathToFileURL(playwrightPath).href);
+await new Promise((resolveServer) => server.listen(0, '127.0.0.1', resolveServer));
+const port = server.address().port;
+const browser = await chromium.launch({ headless: true });
+const pageHandle = await browser.newPage();
+const errors = [];
+pageHandle.on('pageerror', (error) => errors.push(error.stack || String(error)));
+pageHandle.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()); });
+try {
+  await pageHandle.goto(`http://127.0.0.1:${port}/`);
+  for (let attempt = 0; attempt < 60; attempt++) {
+    if ((await pageHandle.evaluate(() => window.__done === true))) break;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 500));
+  }
+  const state = await pageHandle.evaluate(() => ({ done: window.__done === true, log: window.__log }));
+  assert.equal(errors.length, 0, errors.join(' | '));
+  assert.equal(state.done, true, JSON.stringify(state));
+  const mediaRequests = requests.filter((path) => path.startsWith('/mabr/'));
+  assert.deepEqual(mediaRequests, [], `cached media escaped to HTTP: ${mediaRequests.join(', ')}`);
+  console.log(`PASS: real route.wasm + RaptorQ recovery reached Shaka DASH and HLS playback (${state.log.join('; ')})`);
+} finally {
+  await browser.close();
+  await new Promise((resolveServer) => server.close(resolveServer));
+}
