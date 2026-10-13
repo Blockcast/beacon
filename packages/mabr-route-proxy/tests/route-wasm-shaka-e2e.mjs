@@ -183,7 +183,16 @@ window.__fec = { location: fecLocation, toi: fecToi, transferLength: recovered.l
 const sendRaptorQ = (blob, skipSourceIndex = -1) => {
   for (let offset = 0, index = 0; offset < blob.length; offset += fecPacketSize, index++) {
     if (index === skipSourceIndex) continue;
-    const packet = blob.slice(offset, offset + fecPacketSize);
+    const localPacket = blob.slice(offset, offset + fecPacketSize);
+    // fec-raptorq returns its four-byte decoder ID. Current ROUTE encoding 6
+    // carries [SBN:32][reserved:8][ESI:24] on the wire; route.wasm parses
+    // that exact ID and the browser decoder normalizes it back to four bytes.
+    const packet = new Uint8Array(8 + localPacket.length - 4);
+    packet[3] = localPacket[0];
+    packet[5] = localPacket[1];
+    packet[6] = localPacket[2];
+    packet[7] = localPacket[3];
+    packet.set(localPacket.subarray(4), 8);
     send(lct(window.__fec.toi, 8, offset + fecPacketSize >= blob.length,
       packet, raptorqFti(recovered.length, 1200, maxSourceBlockLength, maxEncodingSymbols)));
   }
