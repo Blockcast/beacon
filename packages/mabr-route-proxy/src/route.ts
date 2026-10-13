@@ -98,6 +98,7 @@ export interface RouteRaptorQPacket {
   toi: bigint;
   sbn: number;
   esi: number;
+  /** Exact encoding-6 wire ID: eight bytes on current multicast main; four-byte IDs are accepted from older route.wasm builds. */
   payloadId: Uint8Array;
   symbol: Uint8Array;
   transferLength: number;
@@ -324,9 +325,15 @@ function makeBlockDecoder(module: RouteRaptorQWasmModule, object: RouteRaptorQOb
 }
 
 function makeEncodingPacket(packet: RouteRaptorQPacket): Uint8Array {
-  const payloadId = new Uint8Array(packet.payloadId);
-  // Each decoder is scoped to one source block, so the decoder sees SBN zero.
-  payloadId[0] = 0;
+  // fec-raptorq's decoder ABI uses RFC 6330's four-byte decoder packet ID,
+  // while current ROUTE puts the exact wire ID in eight bytes. Normalize from
+  // the parsed scalar fields so both route.wasm generations remain usable.
+  const payloadId = Uint8Array.of(
+    0,
+    (packet.esi >>> 16) & 0xff,
+    (packet.esi >>> 8) & 0xff,
+    packet.esi & 0xff,
+  );
   const encodingPacket = new Uint8Array(4 + packet.symbol.length);
   encodingPacket.set(payloadId, 0);
   encodingPacket.set(packet.symbol, 4);
@@ -357,12 +364,16 @@ function popRaptorQ(exports: RouteWasmExports): RouteRaptorQPacket {
   const symbolLength = optionalNumber(exports, exports.route_pop_raptorq_symbol_len, 0, 'symbol length');
   const symbolPointer = optionalNumber(exports, exports.route_pop_raptorq_symbol, 0, 'symbol pointer');
   const symbol = symbolLength > 0 ? copyBytes(exports, symbolPointer, symbolLength) : new Uint8Array();
-  const payloadId = Uint8Array.of(
-    sbn & 0xff,
-    (esi >>> 16) & 0xff,
-    (esi >>> 8) & 0xff,
-    esi & 0xff,
-  );
+  // Current multicast main uses [SBN:32][reserved:8][ESI:24] for encoding 6.
+  // Keep the exact wire ID here; makeEncodingPacket() normalizes it for the
+  // four-byte fec-raptorq decoder ABI.
+  const payloadId = new Uint8Array(8);
+  const view = new DataView(payloadId.buffer);
+  view.setUint32(0, sbn >>> 0, false);
+  payloadId[4] = 0;
+  payloadId[5] = (esi >>> 16) & 0xff;
+  payloadId[6] = (esi >>> 8) & 0xff;
+  payloadId[7] = esi & 0xff;
   return {
     tsi: uint64(exports.route_pop_raptorq_tsi?.() ?? 0),
     toi: uint64(exports.route_pop_raptorq_toi?.() ?? 0),
@@ -421,7 +432,7 @@ class RouteRaptorQCollector {
   ingest(packet: RouteRaptorQPacket): void {
     let key: string | undefined;
     try {
-      if (packet.symbol.length === 0 || packet.symbol.length !== packet.symbolSize || packet.sbn < 0 || packet.sbn > 0xff ||
+      if (packet.symbol.length === 0 || packet.symbol.length !== packet.symbolSize || !Number.isSafeInteger(packet.sbn) || packet.sbn < 0 ||
           packet.esi < 0 || packet.esi > MAX_RFC6330_ESI) return;
       key = objectKey(packet);
       let object = this.#objects.get(key);
