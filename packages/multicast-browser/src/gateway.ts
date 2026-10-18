@@ -132,7 +132,10 @@ export interface WaitForGatewayOptions {
 	/**
 	 * How long to wait for a provider, in milliseconds. Required: absence is the
 	 * expected state on most pages, so there is no deadline that suits every
-	 * caller. `0` checks once and returns.
+	 * caller. `0` checks once and returns. `Infinity` sets no deadline: the wait
+	 * then ends only on a provider or on `signal`. A finite value above
+	 * 2^31 - 1 is clamped to it, the largest delay `setTimeout` honours. Any
+	 * other non-finite or negative value is treated as `0`.
 	 */
 	readonly timeoutMs: number;
 	/** Aborting resolves `null` at once and removes every listener and timer. */
@@ -157,6 +160,15 @@ export interface WaitForGatewayOptions {
  * same structural check, so an event that fires before a usable surface exists
  * does not resolve the wait.
  */
+/** The largest delay `setTimeout` honours; anything above it fires at once. */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+function deadlineMs(timeoutMs: number): number {
+	if (timeoutMs === Number.POSITIVE_INFINITY) return timeoutMs;
+	if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return 0;
+	return Math.min(MAX_TIMER_DELAY_MS, timeoutMs);
+}
+
 export function waitForGateway(
 	options: WaitForGatewayOptions,
 	scope: GatewayWaitScope = defaultScope() as GatewayWaitScope,
@@ -165,7 +177,7 @@ export function waitForGateway(
 	if (existing !== null) return Promise.resolve(existing);
 	if (options.signal?.aborted) return Promise.resolve(null);
 
-	const timeoutMs = Number.isFinite(options.timeoutMs) ? Math.max(0, options.timeoutMs) : 0;
+	const timeoutMs = deadlineMs(options.timeoutMs);
 	if (timeoutMs === 0) return Promise.resolve(null);
 	const pollMs = Math.max(10, Number.isFinite(options.pollMs) ? (options.pollMs as number) : 100);
 
@@ -176,7 +188,7 @@ export function waitForGateway(
 			if (settled) return;
 			settled = true;
 			if (pollTimer !== undefined) clearTimeout(pollTimer);
-			clearTimeout(deadline);
+			if (deadline !== undefined) clearTimeout(deadline);
 			scope.removeEventListener?.(GATEWAY_READY_EVENT, check);
 			options.signal?.removeEventListener('abort', onAbort);
 			resolve(gateway);
@@ -190,7 +202,10 @@ export function waitForGateway(
 			if (!settled) pollTimer = setTimeout(poll, pollMs);
 		};
 		const onAbort = () => finish(null);
-		const deadline = setTimeout(() => finish(getGateway(scope)), timeoutMs);
+		const deadline =
+			timeoutMs === Number.POSITIVE_INFINITY
+				? undefined
+				: setTimeout(() => finish(getGateway(scope)), timeoutMs);
 
 		scope.addEventListener?.(GATEWAY_READY_EVENT, check);
 		options.signal?.addEventListener('abort', onAbort, { once: true });

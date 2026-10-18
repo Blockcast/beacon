@@ -113,4 +113,53 @@ describe('waitForGateway', () => {
 		assert.equal(await waitForGateway({ timeoutMs: 2_000, signal: controller.signal }, {}), null);
 		assert.ok(Date.now() - started < 1_000);
 	});
+
+	test('Infinity sets no deadline and still resolves on the ready event', async () => {
+		const s = eventScope();
+		const controller = new AbortController();
+		const wait = waitForGateway(
+			{ timeoutMs: Number.POSITIVE_INFINITY, pollMs: 60_000, signal: controller.signal },
+			s.scope,
+		);
+		await new Promise((r) => setTimeout(r, 30));
+		const provider = fakeProviderSurface();
+		s.install(provider);
+		s.ready();
+		assert.equal(await wait, provider);
+		assert.equal(s.listeners, 0);
+	});
+
+	test('a timeout above the setTimeout range is clamped, not fired at once', async () => {
+		const s = eventScope();
+		const controller = new AbortController();
+		let settled = false;
+		const wait = waitForGateway(
+			{ timeoutMs: 2 ** 32, pollMs: 60_000, signal: controller.signal },
+			s.scope,
+		).then((g) => {
+			settled = true;
+			return g;
+		});
+		await new Promise((r) => setTimeout(r, 50));
+		assert.equal(settled, false);
+		controller.abort();
+		assert.equal(await wait, null);
+	});
+
+	for (const timeoutMs of [Number.NaN, Number.NEGATIVE_INFINITY, -5]) {
+		test(`timeoutMs ${timeoutMs} is treated as 0`, async () => {
+			const s = eventScope();
+			let settled = false;
+			const wait = waitForGateway({ timeoutMs }, s.scope).then((g) => {
+				settled = true;
+				return g;
+			});
+			// Checked once and returned: settled before any timer could fire.
+			await Promise.resolve();
+			await Promise.resolve();
+			assert.equal(settled, true);
+			assert.equal(await wait, null);
+			assert.equal(s.listeners, 0);
+		});
+	}
 });
