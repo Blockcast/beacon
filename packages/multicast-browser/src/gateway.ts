@@ -36,6 +36,15 @@ function looksLikeGateway(candidate: unknown): candidate is MulticastGateway {
 	return typeof surface.subscribe === 'function' && typeof surface.capabilities === 'function';
 }
 
+/** The largest delay `setTimeout` honours; anything above it fires at once. */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+function deadlineMs(timeoutMs: number): number {
+	if (timeoutMs === Number.POSITIVE_INFINITY) return timeoutMs;
+	if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return 0;
+	return Math.min(MAX_TIMER_DELAY_MS, timeoutMs);
+}
+
 /**
  * Resolve the installed provider, or `null` when no usable one is present.
  *
@@ -141,9 +150,9 @@ export interface WaitForGatewayOptions {
 	/** Aborting resolves `null` at once and removes every listener and timer. */
 	readonly signal?: AbortSignal;
 	/**
-	 * Re-check interval, in milliseconds (default 100, floor 10). Polling covers
-	 * a provider that installs the global without dispatching the event, such as
-	 * an extension's injected surface.
+	 * Re-check interval, in milliseconds (default 100, floor 10, capped at
+	 * 2^31−1). Polling covers a provider that installs the global without
+	 * dispatching the event, such as an extension's injected surface.
 	 */
 	readonly pollMs?: number;
 }
@@ -160,15 +169,6 @@ export interface WaitForGatewayOptions {
  * same structural check, so an event that fires before a usable surface exists
  * does not resolve the wait.
  */
-/** The largest delay `setTimeout` honours; anything above it fires at once. */
-const MAX_TIMER_DELAY_MS = 2_147_483_647;
-
-function deadlineMs(timeoutMs: number): number {
-	if (timeoutMs === Number.POSITIVE_INFINITY) return timeoutMs;
-	if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return 0;
-	return Math.min(MAX_TIMER_DELAY_MS, timeoutMs);
-}
-
 export function waitForGateway(
 	options: WaitForGatewayOptions,
 	scope: GatewayWaitScope = defaultScope() as GatewayWaitScope,
@@ -179,7 +179,10 @@ export function waitForGateway(
 
 	const timeoutMs = deadlineMs(options.timeoutMs);
 	if (timeoutMs === 0) return Promise.resolve(null);
-	const pollMs = Math.max(10, Number.isFinite(options.pollMs) ? (options.pollMs as number) : 100);
+	const pollMs = Math.min(
+		MAX_TIMER_DELAY_MS,
+		Math.max(10, Number.isFinite(options.pollMs) ? (options.pollMs as number) : 100),
+	);
 
 	return new Promise((resolve) => {
 		let settled = false;

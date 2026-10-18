@@ -146,6 +146,31 @@ describe('waitForGateway', () => {
 		assert.equal(await wait, null);
 	});
 
+	test('a pollMs above the setTimeout range is clamped, not re-checked every millisecond', async () => {
+		let reads = 0;
+		const scope = {
+			get multicast() {
+				reads++;
+				return undefined;
+			},
+		} as GatewayWaitScope;
+		const controller = new AbortController();
+		const wait = waitForGateway(
+			{ timeoutMs: Number.POSITIVE_INFINITY, pollMs: 2 ** 32, signal: controller.signal },
+			scope,
+		);
+		const before = reads;
+		try {
+			await new Promise((r) => setTimeout(r, 50));
+			// Unclamped, setTimeout fires a 2^32 delay after ~1 ms and the wait
+			// polls on every tick for the whole 50 ms.
+			assert.equal(reads, before);
+		} finally {
+			controller.abort();
+		}
+		assert.equal(await wait, null);
+	});
+
 	for (const timeoutMs of [Number.NaN, Number.NEGATIVE_INFINITY, -5]) {
 		test(`timeoutMs ${timeoutMs} is treated as 0`, async () => {
 			const s = eventScope();
