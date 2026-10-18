@@ -112,3 +112,88 @@ export function createBrowserConformanceDriver(
 		...(physicalJoinCount ? { physicalJoinCount } : {}),
 	};
 }
+
+/**
+ * The event a provider dispatches on the page realm once `window.multicast` is
+ * installed. The standalone bridge polyfill installs the global only after
+ * discovery and a handshake, so it is genuinely asynchronous: a page that calls
+ * `getGateway()` at startup routinely sees `null` for a provider that arrives a
+ * moment later.
+ */
+export const GATEWAY_READY_EVENT = 'multicast-bridge-ready';
+
+/** A scope that can also deliver the provider's ready event. */
+export interface GatewayWaitScope extends BrowserScope {
+	addEventListener?(type: string, listener: () => void): void;
+	removeEventListener?(type: string, listener: () => void): void;
+}
+
+export interface WaitForGatewayOptions {
+	/**
+	 * How long to wait for a provider, in milliseconds. Required: absence is the
+	 * expected state on most pages, so there is no deadline that suits every
+	 * caller. `0` checks once and returns.
+	 */
+	readonly timeoutMs: number;
+	/** Aborting resolves `null` at once and removes every listener and timer. */
+	readonly signal?: AbortSignal;
+	/**
+	 * Re-check interval, in milliseconds (default 100, floor 10). Polling covers
+	 * a provider that installs the global without dispatching the event, such as
+	 * an extension's injected surface.
+	 */
+	readonly pollMs?: number;
+}
+
+/**
+ * Resolve the installed provider, waiting up to `timeoutMs` for one to arrive.
+ *
+ * Resolves the gateway as soon as `getGateway` would return one: immediately if
+ * it is already installed, on the provider's ready event, or on the next poll.
+ * Resolves `null` on timeout or abort. Never rejects, for the same reason
+ * `getGateway` returns rather than throws.
+ *
+ * A ready event is a hint, not a verdict: the global is re-resolved through the
+ * same structural check, so an event that fires before a usable surface exists
+ * does not resolve the wait.
+ */
+export function waitForGateway(
+	options: WaitForGatewayOptions,
+	scope: GatewayWaitScope = defaultScope() as GatewayWaitScope,
+): Promise<MulticastGateway | null> {
+	const existing = getGateway(scope);
+	if (existing !== null) return Promise.resolve(existing);
+	if (options.signal?.aborted) return Promise.resolve(null);
+
+	const timeoutMs = Number.isFinite(options.timeoutMs) ? Math.max(0, options.timeoutMs) : 0;
+	if (timeoutMs === 0) return Promise.resolve(null);
+	const pollMs = Math.max(10, Number.isFinite(options.pollMs) ? (options.pollMs as number) : 100);
+
+	return new Promise((resolve) => {
+		let settled = false;
+		let pollTimer: ReturnType<typeof setTimeout> | undefined;
+		const finish = (gateway: MulticastGateway | null) => {
+			if (settled) return;
+			settled = true;
+			if (pollTimer !== undefined) clearTimeout(pollTimer);
+			clearTimeout(deadline);
+			scope.removeEventListener?.(GATEWAY_READY_EVENT, check);
+			options.signal?.removeEventListener('abort', onAbort);
+			resolve(gateway);
+		};
+		function check(): void {
+			const gateway = getGateway(scope);
+			if (gateway !== null) finish(gateway);
+		}
+		const poll = () => {
+			check();
+			if (!settled) pollTimer = setTimeout(poll, pollMs);
+		};
+		const onAbort = () => finish(null);
+		const deadline = setTimeout(() => finish(getGateway(scope)), timeoutMs);
+
+		scope.addEventListener?.(GATEWAY_READY_EVENT, check);
+		options.signal?.addEventListener('abort', onAbort, { once: true });
+		pollTimer = setTimeout(poll, pollMs);
+	});
+}

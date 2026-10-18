@@ -23,9 +23,13 @@
 
 export {
 	createBrowserConformanceDriver,
+	GATEWAY_READY_EVENT,
 	getGateway,
 	hasGateway,
+	waitForGateway,
 	type BrowserDriverHooks,
+	type GatewayWaitScope,
+	type WaitForGatewayOptions,
 } from './gateway.ts';
 
 export {

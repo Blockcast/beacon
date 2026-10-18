@@ -12,6 +12,7 @@ nothing more:
 | job | entry point |
 |---|---|
 | Resolve the installed provider against `MulticastGateway` | `getGateway`, `hasGateway` |
+| Wait for a provider that installs itself after page startup | `waitForGateway`, `GATEWAY_READY_EVENT` |
 | Collect the facts `evaluateReadiness` consumes | `observeReadiness` and its parts |
 | Run the contract's conformance suite in a browser realm | `createBrowserConformanceDriver` |
 
