@@ -4,7 +4,7 @@ on:
   pull_request:
   push:
     branches: [main]
-    tags: ["v*"]
+    tags: ["v*", "window-multicast-bridge-v*"]
   workflow_dispatch:
 
 # Node is pinned to an exact release, never the bare range '24' (the reasoning
@@ -69,12 +69,30 @@ jobs:
           ../multicast-contract/node_modules/.bin/tsc -b
           npm test
 
+      # The bridge is plain ESM; its build is an esbuild minify of src/ into
+      # dist/, so `npm install` here only fetches esbuild. The suite runs twice:
+      # on src/, and on the minified dist/ that actually ships (test:dist
+      # redirects module resolution only, so source-text tests still read src/).
+      # A minifier-sensitive regression, e.g. after an esbuild bump, fails here.
+      - name: Build and test the window.multicast bridge
+        working-directory: packages/window-multicast-bridge
+        run: |
+          npm install --include=dev --no-audit --no-fund
+          npm run build
+          npm test
+          npm run test:dist
+
       - name: Pack release artifacts
         run: |
           mkdir npm-packages
           npm pack ./packages/multicast-contract --pack-destination npm-packages
           npm pack ./packages/multicast-browser --pack-destination npm-packages
-          ls -l npm-packages
+          # The bridge versions on its own tag (see `publish-bridge`), so it packs
+          # into its own directory: the `v*` publish job asserts EVERY tarball in
+          # npm-packages/ against its tag, and the bridge's version is not that tag.
+          mkdir npm-packages-bridge
+          npm pack ./packages/window-multicast-bridge --pack-destination npm-packages-bridge
+          ls -l npm-packages npm-packages-bridge
 
       # Asserted on the packed tarballs, never on the repo tree: what ships is
       # the tarball, and `files` / .npmignore decide which of the two you are
@@ -82,7 +100,7 @@ jobs:
       - name: Verify tarball contents
         run: |
           set -euo pipefail
-          for tgz in npm-packages/*.tgz; do
+          for tgz in npm-packages/*.tgz npm-packages-bridge/*.tgz; do
             echo "=== $tgz ==="
             # Capture the member list once rather than piping `tar` into a
             # matcher: `grep -q` exits at the first match, which SIGPIPEs tar,
@@ -193,10 +211,40 @@ jobs:
             --module nodenext --moduleResolution nodenext --target ES2022 \
             --lib ES2022,DOM "$dir/probe.ts"
 
+      # What ships is the minified dist/, not src/, so prove the packed tarball
+      # installs and its two entry points resolve and export what consumers
+      # import. Registry-free: the bridge has no dependencies.
+      - name: Verify the bridge installs and imports standalone
+        run: |
+          set -euo pipefail
+          dir="$(mktemp -d)"
+          echo '{"name":"probe","private":true,"type":"module"}' > "$dir/package.json"
+          npm install --prefix "$dir" --no-audit --no-fund \
+            ./npm-packages-bridge/blockcast-window-multicast-bridge-*.tgz
+          cd "$dir"
+          node --input-type=module -e '
+            const bridge = await import("@blockcast/window-multicast-bridge");
+            const bootstrap = await import("@blockcast/window-multicast-bridge/bootstrap");
+            for (const [mod, name] of [[bridge, "initMulticastBridge"], [bridge, "BridgeClient"], [bootstrap, "createBridgeBootstrap"]]) {
+              if (typeof mod[name] !== "function") {
+                console.error(`::error::the packed bridge does not export ${name}`);
+                process.exit(1);
+              }
+            }
+            console.log("packed bridge exports resolve");
+          '
+
       - uses: actions/upload-artifact@v4
         with:
           name: npm-packages
           path: npm-packages/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-packages-bridge
+          path: npm-packages-bridge/*.tgz
           if-no-files-found: error
           retention-days: 7
 
@@ -371,3 +419,42 @@ jobs:
 
       - name: Publish @blockcast/multicast-browser
         run: npm publish ./npm-packages/blockcast-multicast-browser-*.tgz --access public --provenance --loglevel silly
+
+  # The bridge's release job. Same mechanics as `publish` above (hosted runner,
+  # OIDC trusted publishing, no registry-url, npm 11, provenance, silly loglevel)
+  # and the same first-publish bootstrap prerequisite; read the comments there.
+  # It differs only in the tag: `window-multicast-bridge-v<version>`, asserted
+  # against the one tarball it publishes.
+  publish-bridge:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/window-multicast-bridge-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Update npm
+        run: |
+          npm install --global npm@11
+          npm --version
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-packages-bridge
+          path: npm-packages-bridge
+
+      - name: Assert the tag matches the packed version
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#window-multicast-bridge-v}"
+          tgz="$(echo npm-packages-bridge/blockcast-window-multicast-bridge-*.tgz)"
+          v="$(tar -xOzf "$tgz" package/package.json \
+               | node -pe 'JSON.parse(require("fs").readFileSync(0)).version')"
+          [ "$v" = "$tag" ] || { echo "::error::$tgz is $v, tag is $tag"; exit 1; }
+
+      - name: Publish @blockcast/window-multicast-bridge
+        run: npm publish ./npm-packages-bridge/blockcast-window-multicast-bridge-*.tgz --access public --provenance --loglevel silly

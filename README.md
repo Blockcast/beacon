@@ -11,6 +11,7 @@ contract, its executable conformance suite, and the platform adapters
 | [`@blockcast/multicast-contract`](packages/multicast-contract) | the frozen v1 contract, its read-only readiness surface, and the executable conformance suite. No dependencies. |
 | [`@blockcast/multicast-browser`](packages/multicast-browser) | browser / extension / IWA adapter: structural provider resolution and readiness observation. Depends only on the contract, and consumes it type-only. |
 | [`@blockcast/mabr-route-proxy`](packages/mabr-route-proxy) | tiny native multicast/AMT ROUTE handoff for DASH/HLS CMAF objects; lets Shaka keep its normal segment URLs. |
+| [`@blockcast/window-multicast-bridge`](packages/window-multicast-bridge) | a `window.multicast` provider for ordinary pages: finds a local Blockcast bridge (Beacon app, IWA, native BCDS bridge) and installs the gateway over WebTransport. Ships a minified ESM build; versions on its own `window-multicast-bridge-v*` tag. |
 
 iOS and Android adapters are not in this repository yet.
 
@@ -101,6 +102,11 @@ npm --prefix packages/multicast-contract test
 # who install it from the registry.
 packages/multicast-contract/node_modules/.bin/tsc -b packages/multicast-browser
 npm --prefix packages/multicast-browser test
+
+# The bridge is standalone ESM; its build minifies src/ into dist/.
+npm --prefix packages/window-multicast-bridge install --include=dev
+npm --prefix packages/window-multicast-bridge run build
+npm --prefix packages/window-multicast-bridge test
 ```
 
 ## License

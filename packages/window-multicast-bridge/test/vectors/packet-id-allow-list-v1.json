@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "contract": "mmtp-packet-id-allow-list-v1",
+  "description": "Cross-language test vectors for the MMTP packet_id allow-list a page sends on a bridge subscribe (`packet_ids` / `packetIds`). The IWA gateway (`normalizeMmtpPacketIds`) and the native BCDS bridge (`PacketIdFilter::from_control`) each promise the page the same verdict, error text included; without a shared artifact that promise is prose. packet_id 0 is the MMTP signaling flow (`MMTP_SIGNALING_PACKET_ID` in @blockcast/mmt-base), which the MMT receiver drops unconditionally, so a list naming it is refused rather than accepted into a subscription that delivers nothing (BLO-35479). The page-side window-multicast-bridge refuses the same `signaling` vectors before it sends a subscribe, so an older bridge build that still accepts 0 cannot swallow it.",
+  "maxPacketIds": 64,
+  "signalingPacketId": 0,
+  "errors": {
+    "notArray": "packet_ids must be an array",
+    "tooMany": "packet_ids must contain at most 64 entries",
+    "range": "packet_ids entries must be integers in the range 1-65535",
+    "signaling": "packet_ids must not include 0: packet_id 0 is the MMTP signaling flow (reserved by ISO/IEC 23008-1), not a track, and the receiver discards it"
+  },
+  "accept": [
+    { "name": "empty-means-no-filter", "packetIds": [], "normalized": [] },
+    { "name": "track-bounds", "packetIds": [1, 65535], "normalized": [1, 65535] },
+    { "name": "video-audio-and-repair", "packetIds": [1, 4, 32769, 32772], "normalized": [1, 4, 32769, 32772] },
+    { "name": "duplicates-keep-first-order", "packetIds": [4, 1, 4.0, 1], "normalized": [4, 1] }
+  ],
+  "reject": [
+    { "name": "signaling-alone", "packetIds": [0], "error": "signaling" },
+    { "name": "signaling-among-tracks", "packetIds": [1, 0, 4], "error": "signaling" },
+    { "name": "signaling-as-float", "packetIds": [0.0], "error": "signaling" },
+    { "name": "signaling-as-negative-zero", "packetIds": [-0.0], "error": "signaling" },
+    { "name": "negative", "packetIds": [-1], "error": "range" },
+    { "name": "above-16-bit", "packetIds": [65536], "error": "range" },
+    { "name": "fractional", "packetIds": [1.5], "error": "range" },
+    { "name": "string", "packetIds": ["1"], "error": "range" },
+    { "name": "null-entry", "packetIds": [null], "error": "range" },
+    { "name": "not-an-array", "packetIds": 1, "error": "notArray" },
+    {
+      "name": "too-many",
+      "packetIds": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65],
+      "error": "tooMany"
+    }
+  ]
+}

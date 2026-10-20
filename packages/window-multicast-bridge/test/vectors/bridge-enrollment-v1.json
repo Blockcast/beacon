@@ -1,0 +1,94 @@
+{
+  "schema": 1,
+  "contract": "bcds-enrollment-v1",
+  "description": "Cross-language test vectors for the GET /enrollment attestation. The producer (packages/native-bcds-bridge, BLO-34022) and the page-side consumer (packages/window-multicast-bridge, BLO-34059) each hardcode this wire format; without a shared artifact a change on one side leaves the other silently never enrolling behind a green suite. Both sides read this file, so a change to the format fails a lane on whichever side moves first. The producer (src/identity.rs, `attestation_message_matches_the_shared_contract_vectors`) asserts attestation_message() reproduces `message` byte for byte and that each `signatureVerifies` / `derivesBridgeId` flag is accurate; the consumer (packages/window-multicast-bridge) reconstructs the message from the attestation fields and verifies each vector as it would one off the wire.",
+  "messageFormat": "bcds-enrollment-v1\\n<bridge_id>\\n<fingerprint>\\n<not_before>\\n<not_after>",
+  "encoding": {
+    "hex": "lowercase, no separators",
+    "signature": "fixed-width r||s (64 bytes), not ASN.1 DER — crypto.subtle.verify rejects DER",
+    "publicKey": "uncompressed P-256 point 0x04||X||Y (65 bytes)",
+    "timestamps": "seconds since the Unix epoch"
+  },
+  "vectors": [
+    {
+      "name": "bridge-a-cert-1",
+      "note": "BRIDGE_A on its first certificate. The ordinary case.",
+      "signatureVerifies": true,
+      "derivesBridgeId": true,
+      "message": "bcds-enrollment-v1\n26be53c8429a7914eb50f9849e36d6f279201a29a1260fa468f2ee48b047b411\nabababababababababababababababababababababababababababababababab\n1700000000\n4102444800",
+      "attestation": {
+        "schema": 1,
+        "bridge_id": "26be53c8429a7914eb50f9849e36d6f279201a29a1260fa468f2ee48b047b411",
+        "public_key": "04c424d7d844530e0e38067dec5d396518a212648eaed303831d0ba25ef6dfd60662a9693472035e08cb19039b18cf5c65e0661d378ddc6327d21dafb0be12740e",
+        "fingerprint": "abababababababababababababababababababababababababababababababab",
+        "not_before": 1700000000,
+        "not_after": 4102444800,
+        "signature": "17c469fd5be04b42392172a5a1590768c60f6688490f469bdafb1c742493edc76430ccda4e7f709e40ee5b20b574b2f4d54d70c5d3ad23215abc9ef0d4f970a7"
+      }
+    },
+    {
+      "name": "bridge-a-cert-2-rotated",
+      "note": "BRIDGE_A after its certificate rotated on schedule: same key and id, new fingerprint. A consumer must accept this on the pinned key rather than dropping the bridge.",
+      "signatureVerifies": true,
+      "derivesBridgeId": true,
+      "message": "bcds-enrollment-v1\n26be53c8429a7914eb50f9849e36d6f279201a29a1260fa468f2ee48b047b411\ncdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\n1700000000\n4102444800",
+      "attestation": {
+        "schema": 1,
+        "bridge_id": "26be53c8429a7914eb50f9849e36d6f279201a29a1260fa468f2ee48b047b411",
+        "public_key": "04c424d7d844530e0e38067dec5d396518a212648eaed303831d0ba25ef6dfd60662a9693472035e08cb19039b18cf5c65e0661d378ddc6327d21dafb0be12740e",
+        "fingerprint": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "not_before": 1700000000,
+        "not_after": 4102444800,
+        "signature": "b422aa0afa00bdc1e5337637608758134b2330d0889078a7cfd7e7641b22c2990ac9aafccb0d1017bec870365ada2b7402559e6cb78651a401bb10841697f45f"
+      }
+    },
+    {
+      "name": "bridge-b",
+      "note": "A different bridge. Also what bcds_revoke_enrollment leaves behind, since it mints a fresh key and therefore a fresh id.",
+      "signatureVerifies": true,
+      "derivesBridgeId": true,
+      "message": "bcds-enrollment-v1\nade20de4050ca156e77fec1336e68caaea877a3800010221eed0ea94b187cd35\nefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef\n1700000000\n4102444800",
+      "attestation": {
+        "schema": 1,
+        "bridge_id": "ade20de4050ca156e77fec1336e68caaea877a3800010221eed0ea94b187cd35",
+        "public_key": "04ce3eb668af846d91171e35a1529eaf9affcec6000bd75e1072ac3f35e951ac945bc2f4d1fa3306b3dcffe38a2fed9e969c12ca9b4baf9a421c9beddff148dbd9",
+        "fingerprint": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+        "not_before": 1700000000,
+        "not_after": 4102444800,
+        "signature": "94f65f103457d7b38ee07b9abd1c1da12f7aaa41d1ea25715c9eb4af292b86dea99fadcb07f39855ce16760774155dc3281c65274f93320ffe159e717cb63cfe"
+      }
+    },
+    {
+      "name": "bridge-a-cert-1-expired",
+      "note": "Genuinely signed by BRIDGE_A, but not_after is in the past. The signature is valid; the attestation is not usable.",
+      "signatureVerifies": true,
+      "derivesBridgeId": true,
+      "message": "bcds-enrollment-v1\n26be53c8429a7914eb50f9849e36d6f279201a29a1260fa468f2ee48b047b411\nabababababababababababababababababababababababababababababababab\n1700000000\n1700086400",
+      "attestation": {
+        "schema": 1,
+        "bridge_id": "26be53c8429a7914eb50f9849e36d6f279201a29a1260fa468f2ee48b047b411",
+        "public_key": "04c424d7d844530e0e38067dec5d396518a212648eaed303831d0ba25ef6dfd60662a9693472035e08cb19039b18cf5c65e0661d378ddc6327d21dafb0be12740e",
+        "fingerprint": "abababababababababababababababababababababababababababababababab",
+        "not_before": 1700000000,
+        "not_after": 1700086400,
+        "signature": "2ad5374856a53110af6775b8b2f99d292304f7fbd5e45cd8eab8e032ffbfd90244d9f7d44f4bb0198cfaab7e8412cb01cab06ab8fab9dd72fb109457ed9a5f07"
+      }
+    },
+    {
+      "name": "id-substituted",
+      "note": "Signed correctly by a third key over an attestation naming BRIDGE_B's id. Only the id-to-key derivation is a lie, so a consumer that trusts the published bridge_id accepts it and one that recomputes SHA-256(public_key) does not.",
+      "signatureVerifies": true,
+      "derivesBridgeId": false,
+      "message": "bcds-enrollment-v1\nade20de4050ca156e77fec1336e68caaea877a3800010221eed0ea94b187cd35\nabababababababababababababababababababababababababababababababab\n1700000000\n4102444800",
+      "attestation": {
+        "schema": 1,
+        "bridge_id": "ade20de4050ca156e77fec1336e68caaea877a3800010221eed0ea94b187cd35",
+        "public_key": "04f29b646a931fa92e8bd8c6e296f63d9755f474b9f819148733312c4e501a4aa39958ecec4ac6a35fbe5b0251818f16e21779b43d16adef2a3f0ea5360f944d4a",
+        "fingerprint": "abababababababababababababababababababababababababababababababab",
+        "not_before": 1700000000,
+        "not_after": 4102444800,
+        "signature": "8e165704b59465d4f046c9b43744e7f9e743c980cf484a76c174dc917a032bcc2b447a09d25431293a46bb699d78445b02c20f70d8ade2c9c745449bb7fa1427"
+      }
+    }
+  ]
+}
