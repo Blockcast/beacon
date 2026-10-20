@@ -176,6 +176,7 @@ export interface RouteMabrOptions {
   relayPort?: number;
   /** ATSC 1 is retained as an explicit unsupported mode; it needs a raw-TS host feed. */
   standard?: 'atsc1' | 'atsc3';
+  /** Mount point and cache scope for ROUTE Content-Location URLs: a path of its own, never the origin root. */
   baseUrl?: string;
   maxEntries?: number;
   onObject?: (object: RouteObject) => void;

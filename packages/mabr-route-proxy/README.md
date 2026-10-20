@@ -9,7 +9,10 @@ CMAF objects. Shaka keeps its normal manifest and segment URLs:
 ```ts
 import { createRouteMabrSession } from '@blockcast/mabr-route-proxy';
 
-const manifestUrl = 'https://player.example/live/manifest.mpd';
+// ROUTE objects are mounted under baseUrl: an FDT Content-Location of
+// `live/manifest.mpd` is served at `${baseUrl}live/manifest.mpd`.
+const baseUrl = 'https://player.example/mabr/';
+const manifestUrl = new URL('live/manifest.mpd', baseUrl).href;
 const proxy = createRouteMabrSession({
   gateway: window.multicast,
   wasm: routeWasm,
@@ -18,8 +21,7 @@ const proxy = createRouteMabrSession({
   ingress: 'native',
   slsEndpoint: toSls,
   discoverEndpoints: true,
-  // Resolve FDT Content-Location values against the actual player URL.
-  baseUrl: new URL('/', manifestUrl).href,
+  baseUrl,
   maxEntries: 300,
 });
 const restoreFetch = proxy.installFetch();
@@ -27,6 +29,13 @@ await proxy.start();
 
 await shakaPlayer.load(manifestUrl);       // DASH MPD or HLS .m3u8
 ```
+
+`baseUrl` is also the cache scope. Only Content-Location URLs under its
+directory are cached; anything else is dropped and the request goes to the
+network. ROUTE objects arrive over unauthenticated multicast or AMT, and
+`installFetch()` answers every GET the page makes, so give ROUTE a path of its
+own, never the origin root. A root `baseUrl` lets an on-path injector shadow
+any same-origin URL.
 
 When a network does not carry LLS on the ATSC 3 ASM group, bootstrap the
 service SLS over HTTPS. `sltUrl` is the HTTP LLS/SLT authority exposed by the
@@ -43,7 +52,7 @@ const proxy = createRouteMabrSession({
   sltGroup: 7,                       // optional when /slt/ lists one group
   serviceId: 'nasa-iss-a',            // globalServiceID or numeric serviceId
   discoverEndpoints: true,
-  baseUrl: new URL('/', manifestUrl).href,
+  baseUrl,
 });
 const restoreFetch = proxy.installFetch();
 await proxy.start();
