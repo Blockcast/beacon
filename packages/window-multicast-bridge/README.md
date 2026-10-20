@@ -186,11 +186,13 @@ differently is logged, not applied.
 npm --prefix packages/window-multicast-bridge install --include=dev
 npm --prefix packages/window-multicast-bridge run build   # src/ -> minified dist/
 npm --prefix packages/window-multicast-bridge test
+npm --prefix packages/window-multicast-bridge run test:dist  # same suite on the minified dist/
 ```
 
 `test/vectors/` holds the cross-language contract vectors the native bridge also
 tests against (`packet-id-allow-list-v1.json`, `bridge-enrollment-v1.json`).
-Change them in step with the bridge servers.
+Change them in step with the bridge servers; `test/vectors.test.mjs` pins their
+digests, so a change has to update the pin too.
 
 ## Releasing
 

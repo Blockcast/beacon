@@ -70,14 +70,17 @@ jobs:
           npm test
 
       # The bridge is plain ESM; its build is an esbuild minify of src/ into
-      # dist/, so `npm install` here only fetches esbuild. Its tests run on the
-      # sources, and the probe further down imports the packed build.
+      # dist/, so `npm install` here only fetches esbuild. The suite runs twice:
+      # on src/, and on the minified dist/ that actually ships (test:dist
+      # redirects module resolution only, so source-text tests still read src/).
+      # A minifier-sensitive regression, e.g. after an esbuild bump, fails here.
       - name: Build and test the window.multicast bridge
         working-directory: packages/window-multicast-bridge
         run: |
           npm install --include=dev --no-audit --no-fund
           npm run build
           npm test
+          npm run test:dist
 
       - name: Pack release artifacts
         run: |

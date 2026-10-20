@@ -13,7 +13,8 @@
   ],
   "scripts": {
     "build": "esbuild src/multicast-bridge.js src/bridge-bootstrap.js --minify --format=esm --target=es2022 --outdir=dist",
-    "test": "node --test --test-force-exit test/*.test.mjs",
+    "test": "node --test test/*.test.mjs",
+    "test:dist": "node --import ./test/use-dist.mjs --test test/*.test.mjs",
     "clean": "rm -rf dist"
   },
   "repository": {
