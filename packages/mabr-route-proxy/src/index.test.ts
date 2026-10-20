@@ -45,3 +45,21 @@ test('patches and restores the page fetch used by players', async () => {
   }
   assert.equal(globalThis.fetch, original);
 });
+
+test('refuses locations outside the baseUrl scope and lets them reach the network', async () => {
+  const original = globalThis.fetch;
+  let network = 0;
+  globalThis.fetch = (async () => { network++; return new Response('network'); }) as typeof globalThis.fetch;
+  try {
+    const proxy = new MabrRouteProxy({ baseUrl: 'https://player.test/live/' });
+    for (const url of ['https://player.test/api/session', 'https://evil.test/live/seg.m4s', '../api/session', 'https://player.test/live2/seg.m4s']) {
+      assert.equal(proxy.put({ url, data: Uint8Array.of(1) }), undefined, url);
+    }
+    assert.equal(proxy.size, 0);
+    assert.equal(await (await proxy.fetch('https://player.test/api/session')).text(), 'network');
+    assert.equal(network, 1);
+    assert.equal(proxy.put({ url: 'seg-1.m4s', data: Uint8Array.of(7) }), 'https://player.test/live/seg-1.m4s');
+  } finally {
+    globalThis.fetch = original;
+  }
+});
