@@ -138,8 +138,10 @@ test('preserves completed ROUTE destination metadata for SLS/FDT routing', async
   await session.stop();
 });
 
-test('caps oversized SLS manifests to route.wasm result-buffer capacity', async () => {
+test('skips oversized SLS manifests instead of serving truncated bytes', async () => {
   let listener: ((event: CustomEvent<ArrayBuffer>) => void) | undefined;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response('network')) as typeof globalThis.fetch;
   const gateway = {
     async subscribe() {
       return {
@@ -149,18 +151,65 @@ test('caps oversized SLS manifests to route.wasm result-buffer capacity', async 
       };
     },
   };
-  const session = createRouteMabrSession({
-    gateway,
-    wasm: fakeWasm('x'.repeat((1 << 20) + 64)),
-    group: '239.21.4.1',
-    port: 5004,
-    baseUrl: 'https://player.test/',
-  });
-  await session.start();
-  listener?.({ detail: Uint8Array.of(1).buffer } as CustomEvent<ArrayBuffer>);
-  const response = await session.fetch('https://player.test/live/generated.m3u8');
-  assert.equal((await response.arrayBuffer()).byteLength, 1 << 20);
-  await session.stop();
+  try {
+    const session = createRouteMabrSession({
+      gateway,
+      wasm: fakeWasm('x'.repeat((1 << 20) + 64)),
+      group: '239.21.4.1',
+      port: 5004,
+      baseUrl: 'https://player.test/',
+    });
+    await session.start();
+    listener?.({ detail: Uint8Array.of(1).buffer } as CustomEvent<ArrayBuffer>);
+    assert.equal(session.size, 3); // the fixture's completed ROUTE objects still cache normally
+    assert.equal(await (await session.fetch('https://player.test/live/generated.m3u8')).text(), 'network');
+    await session.stop();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('skips oversized manifests from the indexed SLS export too', async () => {
+  let listener: ((event: CustomEvent<ArrayBuffer>) => void) | undefined;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response('network')) as typeof globalThis.fetch;
+  const memory = new WebAssembly.Memory({ initial: 1 });
+  const encoder = new TextEncoder();
+  const put = (offset: number, value: string): number => {
+    new Uint8Array(memory.buffer, offset, encoder.encode(value).length).set(encoder.encode(value));
+    return offset;
+  };
+  const wasm = { exports: {
+    memory,
+    route_get_buffer: () => 0,
+    route_get_buffer_size: () => 128,
+    route_process_udp: () => {},
+    route_get_completed_count: () => 0,
+    route_sls_manifest_count: () => 1,
+    route_sls_manifest: () => 0,
+    route_sls_manifest_len: () => (1 << 20) + 1,
+    route_sls_manifest_location: () => put(32, 'live/oversized.mpd'),
+    route_sls_manifest_location_len: () => 'live/oversized.mpd'.length,
+  } };
+  const gateway = {
+    async subscribe() {
+      return {
+        addEventListener(_type: 'bytes', callback: (event: CustomEvent<ArrayBuffer>) => void) { listener = callback; },
+        removeEventListener() { listener = undefined; },
+        async unsubscribe() {},
+      };
+    },
+  };
+  try {
+    const session = createRouteMabrSession({ gateway, wasm, group: '239.21.4.1', port: 5004, baseUrl: 'https://player.test/' });
+    await session.start();
+    listener?.({ detail: Uint8Array.of(1).buffer } as CustomEvent<ArrayBuffer>);
+    assert.equal(session.size, 0);
+    assert.equal(await (await session.fetch('https://player.test/live/oversized.mpd')).text(), 'network');
+    await session.stop();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('exposes every DASH and HLS manifest signalled by SLS', async () => {
@@ -395,6 +444,61 @@ test('learns rendition endpoints from the service SLS S-TSID', async () => {
   assert.deepEqual(configs[1], {
     origin: 'ip-multicast', group: '239.21.4.11', port: 5004,
     consume: 'bytes',
+  });
+  await session.stop();
+});
+
+test('continues SLS rendition discovery and retries failed subscriptions', async () => {
+  const configs: Record<string, unknown>[] = [];
+  const listeners: Array<(event: CustomEvent<ArrayBuffer>) => void> = [];
+  let attempts = 0;
+  const gateway = {
+    async subscribe(value: object) {
+      const config = value as Record<string, unknown>;
+      configs.push(config);
+      if (config.group === '239.21.4.11' && attempts++ === 0) throw new Error('transient gateway failure');
+      return {
+        addEventListener(_type: 'bytes', callback: (event: CustomEvent<ArrayBuffer>) => void) { listeners.push(callback); },
+        removeEventListener() {},
+        async unsubscribe() {},
+      };
+    },
+  };
+  const wasm = fakeWasm();
+  const encoder = new TextEncoder();
+  const stsid = [
+    '1|239.21.4.11|5004|0.0.0.0|239.21.4.10|0||||video|0|0|0',
+    '1|239.21.4.12|5004|0.0.0.0|239.21.4.10|0||||video|0|0|0',
+  ];
+  const pointer = 3800;
+  let discoveryCount = 0;
+  wasm.exports.route_get_sls_count = () => 1;
+  wasm.exports.route_stsid_session_count = () => { discoveryCount++; return stsid.length; };
+  wasm.exports.route_stsid_session = (index: number) => {
+    const value = stsid[index]!;
+    new Uint8Array(wasm.exports.memory.buffer, pointer, value.length).set(encoder.encode(value));
+    return pointer;
+  };
+  wasm.exports.route_stsid_session_len = (index?: number) => stsid[index ?? 0]!.length;
+  const session = createRouteMabrSession({
+    gateway,
+    wasm,
+    ingress: 'native',
+    slsEndpoint: {group: '239.21.4.10', port: 5004},
+  });
+  await session.start();
+  listeners[0]?.({detail: Uint8Array.of(1).buffer} as CustomEvent<ArrayBuffer>);
+  for (let i = 0; i < 20 && configs.length < 3; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(discoveryCount, 1);
+  assert.deepEqual(configs.slice(1), [
+    {origin: 'ip-multicast', group: '239.21.4.11', port: 5004, consume: 'bytes'},
+    {origin: 'ip-multicast', group: '239.21.4.12', port: 5004, consume: 'bytes'},
+  ]);
+  listeners[0]?.({detail: Uint8Array.of(1).buffer} as CustomEvent<ArrayBuffer>);
+  for (let i = 0; i < 20 && configs.length < 4; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(discoveryCount, 2);
+  assert.deepEqual(configs[3], {
+    origin: 'ip-multicast', group: '239.21.4.11', port: 5004, consume: 'bytes',
   });
   await session.stop();
 });
