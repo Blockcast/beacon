@@ -1,0 +1,65 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { MabrRouteProxy } from './index.ts';
+
+test('serves cached CMAF bytes and falls through misses', async () => {
+  const proxy = new MabrRouteProxy({ baseUrl: 'https://player.test/live/' });
+  proxy.put({ url: 'seg-1.m4s', data: Uint8Array.of(1, 2, 3) });
+  const response = await proxy.fetch('https://player.test/live/seg-1.m4s');
+  assert.deepEqual([...new Uint8Array(await response.arrayBuffer())], [1, 2, 3]);
+  assert.equal(response.headers.get('content-type'), 'video/mp4');
+  assert.equal(proxy.size, 1);
+});
+
+test('evicts oldest entries', () => {
+  const proxy = new MabrRouteProxy({ maxEntries: 1, baseUrl: 'https://player.test/' });
+  proxy.put({ url: 'a.m4s', data: Uint8Array.of(1) });
+  proxy.put({ url: 'b.m4s', data: Uint8Array.of(2) });
+  assert.equal(proxy.size, 1);
+});
+
+test('attaches a window.multicast bytes subscription', async () => {
+  let listener: ((event: { detail: ArrayBuffer }) => void) | undefined;
+  const subscription = {
+    addEventListener: (_type: 'bytes', cb: (event: { detail: ArrayBuffer }) => void) => { listener = cb; },
+    removeEventListener: () => { listener = undefined; },
+  };
+  const proxy = new MabrRouteProxy({ baseUrl: 'https://player.test/' });
+  const detach = proxy.attach(subscription, () => ({ url: 'live.m4s', data: Uint8Array.of(9) }));
+  listener?.({ detail: new Uint8Array([1]).buffer });
+  assert.equal(proxy.size, 1);
+  detach();
+  assert.equal(listener, undefined);
+});
+
+test('patches and restores the page fetch used by players', async () => {
+  const original = globalThis.fetch;
+  const proxy = new MabrRouteProxy({ baseUrl: 'https://player.test/' });
+  proxy.put({ url: 'master.m3u8', data: new TextEncoder().encode('#EXTM3U') });
+  const restore = proxy.installFetch();
+  try {
+    const response = await fetch('https://player.test/master.m3u8');
+    assert.equal(await response.text(), '#EXTM3U');
+  } finally {
+    restore();
+  }
+  assert.equal(globalThis.fetch, original);
+});
+
+test('refuses locations outside the baseUrl scope and lets them reach the network', async () => {
+  const original = globalThis.fetch;
+  let network = 0;
+  globalThis.fetch = (async () => { network++; return new Response('network'); }) as typeof globalThis.fetch;
+  try {
+    const proxy = new MabrRouteProxy({ baseUrl: 'https://player.test/live/' });
+    for (const url of ['https://player.test/api/session', 'https://evil.test/live/seg.m4s', '../api/session', 'https://player.test/live2/seg.m4s']) {
+      assert.equal(proxy.put({ url, data: Uint8Array.of(1) }), undefined, url);
+    }
+    assert.equal(proxy.size, 0);
+    assert.equal(await (await proxy.fetch('https://player.test/api/session')).text(), 'network');
+    assert.equal(network, 1);
+    assert.equal(proxy.put({ url: 'seg-1.m4s', data: Uint8Array.of(7) }), 'https://player.test/live/seg-1.m4s');
+  } finally {
+    globalThis.fetch = original;
+  }
+});
