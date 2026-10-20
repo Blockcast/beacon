@@ -862,8 +862,8 @@ export class RouteMabrSession {
       const count = exports.route_stsid_session_count?.() ?? 0;
       const read = exports.route_stsid_session;
       const readLen = exports.route_stsid_session_len;
-      if (slsCount !== undefined) this.#lastSlsCount = slsCount;
       if (!read || !readLen || !Number.isSafeInteger(count) || count < 1) return;
+      let failed = false;
       for (let index = 0; index < count; index++) {
         const raw = read(index);
         const value = readString(exports, raw, readLen());
@@ -872,8 +872,14 @@ export class RouteMabrSession {
         const port = Number(portText);
         if (!Number.isInteger(port) || port < 1 || port > 65535) continue;
         const normalizedSource = normalizeRouteSource(source);
-        await subscribeEndpoint({group, port, ...(normalizedSource ? {source: normalizedSource} : {})});
+        try {
+          await subscribeEndpoint({group, port, ...(normalizedSource ? {source: normalizedSource} : {})});
+        } catch {
+          // Keep discovering the other renditions and retry this version later.
+          failed = true;
+        }
       }
+      if (!failed && slsCount !== undefined) this.#lastSlsCount = slsCount;
     }).catch(() => { /* malformed or withdrawn SLS must not stop the SLS leg */ }).finally(() => {
       if (generation === this.#sessionGeneration) this.#discoveryPending = false;
     });
@@ -896,8 +902,9 @@ export class RouteMabrSession {
         Number.isSafeInteger(count) && count > 0) {
       for (let index = 0; index < count; index++) {
         const bodyPointer = exports.route_sls_manifest(index);
-        const bodyLength = Math.min(exports.route_sls_manifest_len(), MAX_RESULT_BUFFER_BYTES);
-        if (bodyPointer === undefined || bodyLength <= 0) continue;
+        const bodyLength = exports.route_sls_manifest_len();
+        if (!Number.isSafeInteger(bodyLength) || bodyLength <= 0 || bodyLength > MAX_RESULT_BUFFER_BYTES) continue;
+        if (bodyPointer === undefined) continue;
         const data = copyBytes(exports, bodyPointer, bodyLength);
         const location = readString(
           exports,
@@ -913,8 +920,8 @@ export class RouteMabrSession {
     const location = readString(exports, exports.route_get_mpd_location(), exports.route_get_mpd_location_len());
     // route_get_mpd() copies into route.wasm's fixed 1 MiB result buffer while
     // route_get_mpd_len() reports the uncapped source length.
-    const length = Math.min(exports.route_get_mpd_len(), MAX_RESULT_BUFFER_BYTES);
-    if (!location || length <= 0) return;
+    const length = exports.route_get_mpd_len();
+    if (!location || !Number.isSafeInteger(length) || length <= 0 || length > MAX_RESULT_BUFFER_BYTES) return;
     const data = copyBytes(exports, exports.route_get_mpd(), length);
     this.#proxy.put({ url: location, data });
   }
