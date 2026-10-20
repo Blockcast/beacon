@@ -13,10 +13,11 @@ const manifestUrl = 'https://player.example/live/manifest.mpd';
 const proxy = createRouteMabrSession({
   gateway: window.multicast,
   wasm: routeWasm,
-  // DIMT/native multicast. Use ingress: 'amt' plus relay/relayPort for AMT.
+  // `toSls` is the service SLS endpoint selected by Traffic Ops. Use
+  // ingress: 'amt' plus relay/relayPort for an AMT receiver.
   ingress: 'native',
-  group: '239.21.4.1',
-  port: 5004,
+  slsEndpoint: toSls,
+  discoverEndpoints: true,
   // Resolve FDT Content-Location values against the actual player URL.
   baseUrl: new URL('/', manifestUrl).href,
   maxEntries: 300,
@@ -27,12 +28,58 @@ await proxy.start();
 await shakaPlayer.load(manifestUrl);       // DASH MPD or HLS .m3u8
 ```
 
+When a network does not carry LLS on the ATSC 3 ASM group, bootstrap the
+service SLS over HTTPS. `sltUrl` is the HTTP LLS/SLT authority exposed by the
+TO-selected sender; it is used only to select the first service SLS leg. The
+browser still receives ROUTE bytes through DIMT or AMT, and the S-TSID on that
+leg supplies the rendition `(S,G,port)` values:
+
+```ts
+const proxy = createRouteMabrSession({
+  gateway: window.multicast,
+  wasm: routeWasm,
+  ingress: 'native',                 // use 'amt' with relay/relayPort for AMT
+  sltUrl: 'https://live.example/slt/',
+  sltGroup: 7,                       // optional when /slt/ lists one group
+  serviceId: 'nasa-iss-a',            // globalServiceID or numeric serviceId
+  discoverEndpoints: true,
+  baseUrl: new URL('/', manifestUrl).href,
+});
+const restoreFetch = proxy.installFetch();
+await proxy.start();
+await shakaPlayer.load(manifestUrl);  // .mpd or .m3u8
+```
+
+The client fetches `/slt/` to list access groups, then `/slt/<group>` to read
+the SLT XML and select the service's `slsProtocol="1"` ROUTE
+`BroadcastSvcSignaling`. A deployment may pass a direct `/slt/<group>` URL
+instead. The client fails closed when the service selector does not identify
+exactly one SLS endpoint; it never guesses a media rendition group and does
+not require LLS ASM reception.
+
+For TO/SLS-driven mABR, pass only the TO-selected service SLS leg. The
+existing route.wasm S-TSID exports then add each rendition's `(S,G,port)` as
+the service signals it; no rendition groups are copied into the page:
+
+```ts
+const proxy = createRouteMabrSession({
+  gateway: window.multicast,
+  wasm: routeWasm,
+  ingress: 'native',
+  slsEndpoint: toSls,
+  discoverEndpoints: true,
+});
+```
+
 The proxy patches only `fetch`, returns a normal `Response`, and falls through
 to the network on a cache miss. Call `stop()` and `restoreFetch()` when playback
 ends.
 
 The session uses the existing route.wasm completed-object ABI and its SLS
-manifest accessors (`route_get_mpd*`); it does not reimplement ROUTE or SLS.
+manifest accessors (`route_sls_manifest*`, with `route_get_mpd*` as a legacy
+fallback); it does not reimplement ROUTE object assembly. Both DASH MPDs and
+HLS master/media playlists are cached by their signalled FDT
+`Content-Location`, along with the CMAF initialization and media fragments.
 Pass the handle returned by the existing loader after that loader has called
 `route_init()`.
 Set `ingress: 'native'` for DIMT (`origin: 'ip-multicast'`) or `ingress: 'amt'`
@@ -54,16 +101,20 @@ const proxy = createRouteMabrSession({
   gateway: window.multicast,
   wasm: routeWasm,
   ingress: 'native',
-  group: '239.21.4.1',
-  port: 5004,
+  slsEndpoint: toSls,
+  discoverEndpoints: true,
   raptorq: { wasm: raptorqWasm },
 });
 ```
 
 The sidecar must be initialized before `start()`. Recovery uses the parser's
-FTI geometry and exact `[SBN, ESI]` payload IDs, then stores the reconstructed
-object at its FDT `contentLocation`; old route.wasm builds simply skip this
-optional path.
+FTI geometry and scalar `[SBN, ESI]` fields, normalizing each source block to
+the decoder's zero-based block ID, then stores the reconstructed object at its
+FDT `contentLocation`; old route.wasm builds simply skip this
+optional path. The collector bounds browser state at 32 objects, 64 MiB per
+object, 255 source blocks per object, and 262,144 symbols per object by
+default; set the `raptorq.max*` options when the service's announced geometry
+requires a different resource budget.
 
 The browser E2E test uses the checked-out ATSC 3 parser, the real
 `fec-raptorq` WASM module, and Shaka's test CMAF assets. It drops one source
@@ -75,5 +126,7 @@ npm run test:e2e
 ```
 
 Set `PMG_ROOT`, `ROUTE_WASM`, `ROUTE_WASM_EXEC`, `RAPTORQ_JS`, `RAPTORQ_WASM`,
-`SHAKA_JS`, `MEDIA_ROOT`, or `PLAYWRIGHT` when those artifacts live outside the
-adjacent `pim-multicast-gateway` checkout.
+`SHAKA_JS`, `MEDIA_ROOT`, `PLAYWRIGHT`, or `CHROME_PATH` when those artifacts
+live outside the adjacent `pim-multicast-gateway` checkout. `CHROME_PATH` is
+useful when the installed browser is available but Playwright's pinned revision
+is not.

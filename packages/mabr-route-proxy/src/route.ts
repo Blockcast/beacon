@@ -26,6 +26,17 @@ export interface RouteWasmExports {
   route_get_mpd_len?(): number;
   route_get_mpd_location?(): number | bigint;
   route_get_mpd_location_len?(): number;
+  route_get_sls_count?(): number | bigint;
+  /** All DASH/HLS manifests signalled by the most recent SLS bundle. */
+  route_sls_manifest_count?(): number;
+  route_sls_manifest?(index: number): number | bigint;
+  route_sls_manifest_len?(): number;
+  route_sls_manifest_location?(index: number): number | bigint;
+  route_sls_manifest_location_len?(): number;
+  /** Parsed S-TSID sessions signaled by the service SLS. */
+  route_stsid_session_count?(): number;
+  route_stsid_session?(index: number): number | bigint;
+  route_stsid_session_len?(): number;
   /** Optional RFC 6330 symbol queue exposed by newer route.wasm builds. */
   route_get_raptorq_count?(): number;
   route_pop_raptorq_tsi?(): number | bigint;
@@ -98,7 +109,7 @@ export interface RouteRaptorQPacket {
   toi: bigint;
   sbn: number;
   esi: number;
-  /** Exact encoding-6 wire ID: eight bytes on current multicast main; four-byte IDs are accepted from older route.wasm builds. */
+  /** Exact ROUTE encoding-6 wire ID: [SBN:8][ESI:24]. */
   payloadId: Uint8Array;
   symbol: Uint8Array;
   transferLength: number;
@@ -125,6 +136,12 @@ export interface RouteRaptorQOptions {
   onRecovered?: (object: RouteObject) => void;
 }
 
+export interface RouteEndpoint {
+  group: string;
+  port: number;
+  source?: string;
+}
+
 export interface RouteGateway {
   /** Structural subset of the page-facing window.multicast.subscribe surface. */
   subscribe(config: object): Promise<ByteSubscription & { unsubscribe(): Promise<void> | void }>;
@@ -142,6 +159,18 @@ export interface RouteMabrOptions {
   group?: string;
   port?: number;
   source?: string;
+  /** Multiple ROUTE legs, one per mABR rendition. `group`/`port` remain the single-leg shorthand. */
+  endpoints?: RouteEndpoint[];
+  /** The one TO-selected service SLS leg. Media legs are learned from S-TSID. */
+  slsEndpoint?: RouteEndpoint;
+  /** HTTP LLS/SLT endpoint used to discover the service SLS leg. */
+  sltUrl?: string;
+  /** Optional LLS group id when `sltUrl` exposes more than one SLT. */
+  sltGroup?: number;
+  /** Optional numeric A/331 service id or global service id to select from SLT. */
+  serviceId?: string | number;
+  /** Subscribe to media legs announced by the service SLS/S-TSID. */
+  discoverEndpoints?: boolean;
   /** Required when ingress is AMT. */
   relay?: string;
   relayPort?: number;
@@ -156,6 +185,79 @@ export interface RouteMabrOptions {
 
 const decoder = new TextDecoder();
 const MAX_RESULT_BUFFER_BYTES = 1 << 20;
+
+function xmlAttribute(tag: string, name: string): string {
+  const match = tag.match(new RegExp(`(?:^|\\s)${name}\\s*=\\s*(["'])(.*?)\\1`, 'i'));
+  return match?.[2] ?? '';
+}
+
+function xmlUnescape(value: string): string {
+  return value.replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+}
+
+function normalizeRouteSource(value?: string): string | undefined {
+  const source = value?.trim();
+  if (!source || source === '0.0.0.0' || source === '::' || source === '0:0:0:0:0:0:0:0') return undefined;
+  return source;
+}
+
+function parseSltEndpoints(xml: string, serviceId?: string | number): RouteEndpoint[] {
+  const endpoints: RouteEndpoint[] = [];
+  const servicePattern = /<((?:[A-Za-z_][\w.-]*:)?(?:Service|Server))\b([^>]*)>([\s\S]*?)<\/\1\s*>/gi;
+  let serviceMatch: RegExpExecArray | null;
+  while ((serviceMatch = servicePattern.exec(xml))) {
+    const serviceTag = serviceMatch[2]!;
+    const body = serviceMatch[3]!;
+    const numericId = xmlUnescape(xmlAttribute(serviceTag, 'serviceId'));
+    const globalId = xmlUnescape(xmlAttribute(serviceTag, 'globalServiceID'));
+    if (serviceId !== undefined && String(serviceId) !== numericId && String(serviceId) !== globalId) continue;
+    const signal = [...body.matchAll(/<((?:[A-Za-z_][\w.-]*:)?BroadcastSvcSignaling)\b([^>]*?)(?:\/?>)/gi)]
+      .find((match) => xmlAttribute(match[2]!, 'slsProtocol') === '1');
+    if (!signal) continue;
+    const group = xmlUnescape(xmlAttribute(signal[2]!, 'slsDestinationIpAddress')).trim();
+    const source = normalizeRouteSource(xmlUnescape(xmlAttribute(signal[2]!, 'slsSourceIpAddress')));
+    const port = Number(xmlAttribute(signal[2]!, 'slsDestinationUdpPort'));
+    if (group && Number.isInteger(port) && port > 0 && port <= 65535) {
+      endpoints.push({ group, port, ...(source ? { source } : {}) });
+    }
+  }
+  return endpoints;
+}
+
+async function discoverSlsEndpoint(options: RouteMabrOptions): Promise<RouteEndpoint> {
+  const raw = options.sltUrl?.trim();
+  if (!raw) throw new RangeError('sltUrl is required for HTTP LLS discovery');
+  const base = new URL(raw, globalThis.location?.href ?? 'http://localhost/');
+  const basePath = base.pathname.replace(/\/+$/, '');
+  const get = async (url: string): Promise<string> => {
+    const response = await globalThis.fetch(url);
+    if (!response.ok) throw new Error(`HTTP LLS fetch ${url} failed with ${response.status}`);
+    return response.text();
+  };
+  if (/\/slt\/\d+$/i.test(basePath) || /\.xml$/i.test(basePath)) {
+    const endpoints = parseSltEndpoints(await get(base.href), options.serviceId);
+    if (endpoints.length !== 1) throw new Error(`HTTP LLS advertised ${endpoints.length} ROUTE SLS endpoints`);
+    return endpoints[0]!;
+  }
+  const sltDirectory = basePath.endsWith('/slt')
+    ? new URL(`${basePath}/`, base.origin).href
+    : new URL('slt/', base).href;
+
+  const index = await get(sltDirectory);
+  const groups = options.sltGroup === undefined
+    ? [...index.matchAll(/href\s*=\s*["'](\d+)["']/gi)].map((match) => Number(match[1]))
+    : [options.sltGroup];
+  const documents = groups.length > 0
+    ? await Promise.all([...new Set(groups)].map((group) => get(new URL(String(group), sltDirectory).href)))
+    : [index];
+  const endpoints = documents.flatMap((document) => parseSltEndpoints(document, options.serviceId));
+  const unique = [...new Map(endpoints.map((endpoint) => [`${endpoint.source ?? ''}\0${endpoint.group}\0${endpoint.port}`, endpoint])).values()];
+  if (unique.length !== 1) {
+    const selector = options.serviceId === undefined ? 'serviceId' : `serviceId ${String(options.serviceId)}`;
+    throw new Error(`HTTP LLS advertised ${unique.length} ROUTE SLS endpoints for ${selector}; select exactly one`);
+  }
+  return unique[0]!;
+}
 
 function uint64(value: number | bigint): bigint {
   return typeof value === 'bigint' ? value : BigInt(value);
@@ -249,7 +351,10 @@ function raptorqGeometry(packet: RouteRaptorQPacket, options: {
   const numSubBlks = packet.numSubBlks || 1;
   const symAlignParam = packet.symAlignParam || 8;
   const totalSourceSymbols = Math.ceil(transferLength / symbolSize);
-  const maxSbLen = packet.maxSbLen;
+  // The parser may carry the source-plane K while a repair symbol carries a
+  // single-block RaptorQ object. Clamp that stale K to this object's source
+  // symbol count before constructing the browser decoder.
+  const maxSbLen = packet.maxSbLen > totalSourceSymbols ? totalSourceSymbols : packet.maxSbLen;
   const maxNumEs = packet.maxNumEs;
   if (!Number.isSafeInteger(transferLength) || transferLength < 1 || transferLength > MAX_RFC6330_TRANSFER_LENGTH) {
     throw new RangeError('invalid RaptorQ transfer length');
@@ -325,9 +430,8 @@ function makeBlockDecoder(module: RouteRaptorQWasmModule, object: RouteRaptorQOb
 }
 
 function makeEncodingPacket(packet: RouteRaptorQPacket): Uint8Array {
-  // fec-raptorq's decoder ABI uses RFC 6330's four-byte decoder packet ID,
-  // while current ROUTE puts the exact wire ID in eight bytes. Normalize from
-  // the parsed scalar fields so both route.wasm generations remain usable.
+  // fec-raptorq's decoder ABI uses the same four-byte RFC 6330 ID as ROUTE,
+  // and each block decoder is normalized to SBN zero below.
   const payloadId = Uint8Array.of(
     0,
     (packet.esi >>> 16) & 0xff,
@@ -364,16 +468,12 @@ function popRaptorQ(exports: RouteWasmExports): RouteRaptorQPacket {
   const symbolLength = optionalNumber(exports, exports.route_pop_raptorq_symbol_len, 0, 'symbol length');
   const symbolPointer = optionalNumber(exports, exports.route_pop_raptorq_symbol, 0, 'symbol pointer');
   const symbol = symbolLength > 0 ? copyBytes(exports, symbolPointer, symbolLength) : new Uint8Array();
-  // Current multicast main uses [SBN:32][reserved:8][ESI:24] for encoding 6.
-  // Keep the exact wire ID here; makeEncodingPacket() normalizes it for the
-  // four-byte fec-raptorq decoder ABI.
-  const payloadId = new Uint8Array(8);
-  const view = new DataView(payloadId.buffer);
-  view.setUint32(0, sbn >>> 0, false);
-  payloadId[4] = 0;
-  payloadId[5] = (esi >>> 16) & 0xff;
-  payloadId[6] = (esi >>> 8) & 0xff;
-  payloadId[7] = esi & 0xff;
+  const payloadId = Uint8Array.of(
+    sbn & 0xff,
+    (esi >>> 16) & 0xff,
+    (esi >>> 8) & 0xff,
+    esi & 0xff,
+  );
   return {
     tsi: uint64(exports.route_pop_raptorq_tsi?.() ?? 0),
     toi: uint64(exports.route_pop_raptorq_toi?.() ?? 0),
@@ -403,7 +503,10 @@ function drainRaptorQ(exports: RouteWasmExports, collector: RouteRaptorQCollecto
   let remaining = safeValue(count(), 'queue count');
   while (remaining > 0) {
     try {
-      if (collector) collector.ingest(popRaptorQ(exports));
+      if (collector) {
+        const packet = popRaptorQ(exports);
+        collector.ingest(packet);
+      }
     } finally {
       advance();
       remaining--;
@@ -432,8 +535,14 @@ class RouteRaptorQCollector {
   ingest(packet: RouteRaptorQPacket): void {
     let key: string | undefined;
     try {
-      if (packet.symbol.length === 0 || packet.symbol.length !== packet.symbolSize || !Number.isSafeInteger(packet.sbn) || packet.sbn < 0 ||
+      if (packet.symbol.length === 0 || !Number.isSafeInteger(packet.sbn) || packet.sbn < 0 || packet.sbn > 0xff ||
           packet.esi < 0 || packet.esi > MAX_RFC6330_ESI) return;
+      // The symbol bytes are the authoritative wire size. Older route.wasm
+      // objects can retain the source FDT's ESLen while exposing a repair
+      // symbol with its RaptorQ FTI size.
+      if (packet.symbolSize !== packet.symbol.length) {
+        packet = { ...packet, symbolSize: packet.symbol.length };
+      }
       key = objectKey(packet);
       let object = this.#objects.get(key);
       const geometry = raptorqGeometry(packet, {
@@ -555,6 +664,11 @@ function drain(exports: RouteWasmExports, onObject: (object: RouteObject) => voi
           exports.route_pop_completed_location_len?.(),
         ),
         data: copyBytes(exports, exports.route_pop_completed_data(), length),
+        dstIP: readString(
+          exports,
+          exports.route_pop_completed_dstip?.(),
+          exports.route_pop_completed_dstip_len?.(),
+        ),
       };
       onObject(object);
     } finally {
@@ -571,9 +685,15 @@ function drain(exports: RouteWasmExports, onObject: (object: RouteObject) => voi
 export class RouteMabrSession {
   readonly #options: RouteMabrOptions;
   readonly #proxy: MabrRouteProxy;
-  #subscription: (ByteSubscription & { unsubscribe(): Promise<void> | void }) | undefined;
-  #listener: ((event: CustomEvent<ArrayBuffer>) => void) | undefined;
+  #subscriptions: Array<ByteSubscription & { unsubscribe(): Promise<void> | void }> = [];
+  #listeners: Array<{ subscription: ByteSubscription; listener: (event: CustomEvent<ArrayBuffer>) => void }> = [];
   #raptorq: RouteRaptorQCollector | undefined;
+  #endpointKeys = new Set<string>();
+  #discovering = Promise.resolve();
+  #discoveryPending = false;
+  #lastSlsCount: number | undefined;
+  #sessionGeneration = 0;
+  #active = false;
 
   constructor(options: RouteMabrOptions) {
     this.#proxy = new MabrRouteProxy(options);
@@ -588,10 +708,24 @@ export class RouteMabrSession {
       });
     }
     const ingress = options.ingress ?? 'tuner';
-    const port = options.port;
-    if ((options.standard ?? 'atsc3') === 'atsc3' &&
-        (!options.group || !Number.isInteger(port) || port! < 1 || port! > 65535)) {
-      throw new RangeError('group and port are required for ATSC 3');
+    const endpoints = options.slsEndpoint ? [options.slsEndpoint] : options.endpoints ?? (options.group && options.port != null ?
+      [{group: options.group, port: options.port, ...(options.source ? {source: options.source} : {})}] : []);
+    if ((options.standard ?? 'atsc3') === 'atsc3' && endpoints.length === 0 && !options.sltUrl) {
+      throw new RangeError('group and port (or endpoints or sltUrl) are required for ATSC 3');
+    }
+    if (endpoints.some((endpoint) => typeof endpoint.group !== 'string' || endpoint.group.trim() === '' ||
+        !Number.isInteger(endpoint.port) || endpoint.port < 1 || endpoint.port > 65535)) {
+      throw new RangeError('ROUTE endpoints require a group and valid port');
+    }
+    if (endpoints.some((endpoint) => endpoint.source !== undefined &&
+        (typeof endpoint.source !== 'string' || endpoint.source.trim() === ''))) {
+      throw new RangeError('ROUTE endpoint source must be a nonempty string');
+    }
+    const endpointKeys = new Set<string>();
+    for (const endpoint of endpoints) {
+      const key = `${normalizeRouteSource(endpoint.source) ?? ''}\u0000${endpoint.group.trim()}\u0000${endpoint.port}`;
+      if (endpointKeys.has(key)) throw new RangeError('ROUTE endpoints must be unique');
+      endpointKeys.add(key);
     }
     if ((options.standard ?? 'atsc3') === 'atsc1' && ingress !== 'tuner') {
       throw new RangeError('ATSC1 is only valid with tuner ingress');
@@ -606,64 +740,142 @@ export class RouteMabrSession {
   async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> { return this.#proxy.fetch(input, init); }
 
   async start(): Promise<void> {
-    if (this.#subscription) return;
+    if (this.#subscriptions.length) return;
     const standard = this.#options.standard ?? 'atsc3';
     if (standard === 'atsc1') {
       throw new Error('ATSC1 raw MPEG-TS requires a host-provided route_process_ts feed; window.multicast exposes UDP bytes only');
     }
     const ingress = this.#options.ingress ?? 'tuner';
-    const common = {
-      group: this.#options.group!,
-      port: this.#options.port!,
-      consume: 'bytes' as const,
-      ...(this.#options.source ? { source: this.#options.source } : {}),
-    };
-    const config: object = ingress === 'native'
-      ? { ...common, origin: 'ip-multicast' }
-      : ingress === 'amt'
-        ? { ...common, origin: 'amt', relay: this.#options.relay!, relayPort: this.#options.relayPort! }
-        : { ...common, origin: 'tuner', standard: 'atsc3', protocol: 'route' };
-    const subscription = await this.#options.gateway.subscribe(config);
+    let endpoints = this.#options.slsEndpoint ? [this.#options.slsEndpoint] : this.#options.endpoints ?? (this.#options.group && this.#options.port != null ?
+      [{group: this.#options.group, port: this.#options.port, ...(this.#options.source ? {source: this.#options.source} : {})}] : []);
+    if (endpoints.length === 0 && this.#options.sltUrl) {
+      endpoints = [await discoverSlsEndpoint(this.#options)];
+    }
+    if (endpoints.length === 0) throw new RangeError('group and port (or endpoints or sltUrl) are required for ATSC 3');
     const exports = this.#options.wasm.exports;
-    this.#subscription = subscription;
-    this.#listener = (event) => {
-      const payload = new Uint8Array(event.detail);
-      const pointer = exports.route_get_buffer();
-      const size = exports.route_get_buffer_size();
-      const inputPointer = numberValue(pointer);
-      if (size <= 0) throw new RangeError('route.wasm input buffer is unavailable');
-      if (!exports.route_process_udp) throw new Error('route.wasm has no UDP entrypoint');
-      const group = this.#options.group!;
-      const port = this.#options.port!;
-      const groupBytes = new TextEncoder().encode(group);
-      const sourceBytes = this.#options.source && exports.route_process_udp_with_source
-        ? new TextEncoder().encode(this.#options.source) : new Uint8Array();
-      if (groupBytes.length + sourceBytes.length + payload.length > size) throw new RangeError('route packet exceeds route.wasm input buffer');
-      const input = new Uint8Array(exports.memory.buffer, inputPointer, size);
-      input.set(groupBytes, 0); input.set(sourceBytes, groupBytes.length); input.set(payload, groupBytes.length + sourceBytes.length);
-      if (sourceBytes.length && exports.route_process_udp_with_source) {
-        exports.route_process_udp_with_source(groupBytes.length, sourceBytes.length, port, payload.length);
-      } else {
-        exports.route_process_udp(groupBytes.length, port, payload.length);
+    const discoverEndpoints = this.#options.discoverEndpoints ?? Boolean(this.#options.slsEndpoint || this.#options.sltUrl);
+    const slsGroup = (this.#options.slsEndpoint?.group ?? endpoints[0]!.group).trim();
+    const generation = ++this.#sessionGeneration;
+    this.#lastSlsCount = undefined;
+    const subscribeEndpoint = async (endpoint: RouteEndpoint): Promise<void> => {
+      if (!this.#active || generation !== this.#sessionGeneration) return;
+      const group = endpoint.group.trim();
+      const source = normalizeRouteSource(endpoint.source);
+      const endpointKey = `${source ?? ''}\u0000${group}\u0000${endpoint.port}`;
+      if (this.#endpointKeys.has(endpointKey)) return;
+      this.#endpointKeys.add(endpointKey);
+      const common = {
+        group,
+        port: endpoint.port,
+        consume: 'bytes' as const,
+        ...(source ? { source } : {}),
+      };
+      const config: object = ingress === 'native'
+        ? { ...common, origin: 'ip-multicast' }
+        : ingress === 'amt'
+          ? { ...common, origin: 'amt', relay: this.#options.relay!, relayPort: this.#options.relayPort! }
+          : { ...common, origin: 'tuner', standard: 'atsc3', protocol: 'route' };
+      try {
+        const subscription = await this.#options.gateway.subscribe(config);
+        if (!this.#active || generation !== this.#sessionGeneration) {
+          await subscription.unsubscribe();
+          return;
+        }
+        const listener = (event: CustomEvent<ArrayBuffer>) => {
+          const payload = new Uint8Array(event.detail);
+          const pointer = exports.route_get_buffer();
+          const size = exports.route_get_buffer_size();
+          const inputPointer = numberValue(pointer);
+          if (size <= 0) throw new RangeError('route.wasm input buffer is unavailable');
+          if (!exports.route_process_udp) throw new Error('route.wasm has no UDP entrypoint');
+          const groupBytes = new TextEncoder().encode(group);
+          const sourceBytes = source && exports.route_process_udp_with_source
+            ? new TextEncoder().encode(source) : new Uint8Array();
+          if (groupBytes.length + sourceBytes.length + payload.length > size) throw new RangeError('route packet exceeds route.wasm input buffer');
+          const input = new Uint8Array(exports.memory.buffer, inputPointer, size);
+          input.set(groupBytes, 0); input.set(sourceBytes, groupBytes.length); input.set(payload, groupBytes.length + sourceBytes.length);
+          if (sourceBytes.length && exports.route_process_udp_with_source) {
+            exports.route_process_udp_with_source(groupBytes.length, sourceBytes.length, endpoint.port, payload.length);
+          } else {
+            exports.route_process_udp(groupBytes.length, endpoint.port, payload.length);
+          }
+          drainRaptorQ(exports, this.#raptorq);
+          drain(exports, (object) => this.#ingest(object));
+          this.#ingestManifest(exports);
+          if (discoverEndpoints && group === slsGroup) {
+            this.#queueSlsDiscovery(slsGroup, generation, exports, subscribeEndpoint);
+          }
+        };
+        subscription.addEventListener('bytes', listener);
+        this.#subscriptions.push(subscription);
+        this.#listeners.push({subscription, listener});
+      } catch (error) {
+        this.#endpointKeys.delete(endpointKey);
+        throw error;
       }
-      drainRaptorQ(exports, this.#raptorq);
-      drain(exports, (object) => this.#ingest(object));
-      this.#ingestManifest(exports);
     };
-    subscription.addEventListener('bytes', this.#listener);
+    try {
+      this.#active = true;
+      for (const endpoint of endpoints) {
+        await subscribeEndpoint(endpoint);
+      }
+    } catch (error) {
+      await this.stop();
+      throw error;
+    }
   }
 
   async stop(): Promise<void> {
-    const subscription = this.#subscription;
-    if (!subscription) {
+    this.#active = false;
+    this.#sessionGeneration++;
+    this.#lastSlsCount = undefined;
+    this.#discoveryPending = false;
+    if (!this.#subscriptions.length) {
+      this.#endpointKeys.clear();
       this.#raptorq?.dispose();
       return;
     }
-    if (this.#listener) subscription.removeEventListener?.('bytes', this.#listener);
-    this.#listener = undefined;
-    this.#subscription = undefined;
+    const listeners = this.#listeners.splice(0);
+    const subscriptions = this.#subscriptions.splice(0);
+    this.#endpointKeys.clear();
+    for (const {subscription, listener} of listeners) subscription.removeEventListener?.('bytes', listener);
     this.#raptorq?.dispose();
-    await subscription.unsubscribe();
+    await Promise.all(subscriptions.map((subscription) => subscription.unsubscribe()));
+  }
+
+  #queueSlsDiscovery(slsGroup: string, generation: number, exports: RouteWasmExports,
+    subscribeEndpoint: (endpoint: RouteEndpoint) => Promise<void>): void {
+    if (this.#discoveryPending) return;
+    let slsCount: number | undefined;
+    if (exports.route_get_sls_count) {
+      try {
+        slsCount = safeValue(exports.route_get_sls_count(), 'SLS count');
+      } catch {
+        return;
+      }
+      if (this.#lastSlsCount === slsCount) return;
+    }
+    this.#discoveryPending = true;
+    this.#discovering = this.#discovering.then(async () => {
+      if (!this.#active || generation !== this.#sessionGeneration) return;
+      const count = exports.route_stsid_session_count?.() ?? 0;
+      const read = exports.route_stsid_session;
+      const readLen = exports.route_stsid_session_len;
+      if (slsCount !== undefined) this.#lastSlsCount = slsCount;
+      if (!read || !readLen || !Number.isSafeInteger(count) || count < 1) return;
+      for (let index = 0; index < count; index++) {
+        const raw = read(index);
+        const value = readString(exports, raw, readLen());
+        const [, group, portText, source, advertisedSls] = value.split('|');
+        if (!group || advertisedSls !== slsGroup) continue;
+        const port = Number(portText);
+        if (!Number.isInteger(port) || port < 1 || port > 65535) continue;
+        const normalizedSource = normalizeRouteSource(source);
+        await subscribeEndpoint({group, port, ...(normalizedSource ? {source: normalizedSource} : {})});
+      }
+    }).catch(() => { /* malformed or withdrawn SLS must not stop the SLS leg */ }).finally(() => {
+      if (generation === this.#sessionGeneration) this.#discoveryPending = false;
+    });
   }
 
   #ingest(object: RouteObject): void {
@@ -674,6 +886,27 @@ export class RouteMabrSession {
   }
 
   #ingestManifest(exports: RouteWasmExports): void {
+    // New route.wasm builds retain every valid DASH/HLS SLS part. This is
+    // needed when a service bundle carries an origin MPD before the player
+    // presentation MPD (and its HLS playlists).
+    const count = exports.route_sls_manifest_count?.() ?? 0;
+    if (exports.route_sls_manifest && exports.route_sls_manifest_len &&
+        exports.route_sls_manifest_location && exports.route_sls_manifest_location_len &&
+        Number.isSafeInteger(count) && count > 0) {
+      for (let index = 0; index < count; index++) {
+        const bodyPointer = exports.route_sls_manifest(index);
+        const bodyLength = Math.min(exports.route_sls_manifest_len(), MAX_RESULT_BUFFER_BYTES);
+        if (bodyPointer === undefined || bodyLength <= 0) continue;
+        const data = copyBytes(exports, bodyPointer, bodyLength);
+        const location = readString(
+          exports,
+          exports.route_sls_manifest_location(index),
+          exports.route_sls_manifest_location_len(),
+        );
+        if (location) this.#proxy.put({ url: location, data });
+      }
+      return;
+    }
     if (!exports.route_get_mpd || !exports.route_get_mpd_len ||
         !exports.route_get_mpd_location || !exports.route_get_mpd_location_len) return;
     const location = readString(exports, exports.route_get_mpd_location(), exports.route_get_mpd_location_len());

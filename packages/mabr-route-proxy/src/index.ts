@@ -10,6 +10,7 @@ export type {
 
 export { RouteMabrSession, createRouteMabrSession } from './route.ts';
 export type {
+  RouteEndpoint,
   RouteGateway,
   RouteMabrOptions,
   RouteIngress,

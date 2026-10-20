@@ -196,11 +196,34 @@ test('recovers a lost ROUTE object from a repair symbol and serves it by Content
   await session.stop();
 });
 
+test('uses wire symbol bytes and clamps stale FDT geometry', async () => {
+  const route = routeFixture();
+  const gateway = gatewayFixture();
+  const fec = fakeRaptorQModule();
+  route.setPackets([
+    packet({ esi: 0, symbolSize: 1, maxSbLen: 65535 }),
+    packet({ esi: 1, symbolSize: 1, maxSbLen: 65535 }),
+  ]);
+  const session = createRouteMabrSession({
+    gateway: gateway.gateway,
+    wasm: { exports: route.exports },
+    group: '239.21.4.1',
+    port: 5004,
+    baseUrl: 'https://player.test/',
+    raptorq: { wasm: fec.module },
+  });
+  await session.start();
+  gateway.deliver();
+  assert.deepEqual([...new Uint8Array(await (await session.fetch('https://player.test/live/recovered.m4s')).arrayBuffer())], [...recoveredBytes]);
+  assert.deepEqual([...fec.decoders[0].oti], [0, 0, 0, 0, 4, 0, 0, 4, 1, 0, 1, 1]);
+  await session.stop();
+});
+
 test('rejects malformed symbols and frees bounded objects on eviction and stop', async () => {
   const route = routeFixture();
   const gateway = gatewayFixture();
   const fec = fakeRaptorQModule();
-  route.setPackets([packet({ symbol: Uint8Array.of(1) })]);
+  route.setPackets([packet({ symbol: new Uint8Array() })]);
   const session = createRouteMabrSession({
     gateway: gateway.gateway,
     wasm: { exports: route.exports },
@@ -236,6 +259,24 @@ test('rejects a zero RaptorQ source-block count instead of coercing it to one', 
   gateway.deliver();
   assert.equal(fec.decoders.length, 0);
   assert.equal(session.size, 0);
+  await session.stop();
+});
+
+test('rejects an out-of-range RaptorQ source block number', async () => {
+  const route = routeFixture();
+  const gateway = gatewayFixture();
+  const fec = fakeRaptorQModule();
+  route.setPackets([packet({ sbn: 256 })]);
+  const session = createRouteMabrSession({
+    gateway: gateway.gateway,
+    wasm: { exports: route.exports },
+    group: '239.21.4.1',
+    port: 5004,
+    raptorq: { wasm: fec.module },
+  });
+  await session.start();
+  gateway.deliver();
+  assert.equal(fec.decoders.length, 0);
   await session.stop();
 });
 
