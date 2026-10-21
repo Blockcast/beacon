@@ -2974,8 +2974,10 @@ function narrowSharedPacketIds(shared) {
  * Safari extension's page-bridge.js, which imports this module rather than
  * restating the object. Two copies drifted before (BLO-35597): the Safari copy
  * lacked `originContractVersion` and advertised `['ip-multicast', 'tuner']`, so
- * the Shaka MSF adapter refused every catalog-selected AMT leg with
- * "multicast origin unsupported by IWA: amt".
+ * the Shaka MSF adapter refused every catalog-selected AMT leg. Since BLO-41252
+ * split that refusal into three, the missing version is caught first and the
+ * message reads "multicast origin contract version mismatch: IWA reports none,
+ * this reader requires 1" — the bogus `origins` is never examined.
  *
  * The browser side is a thin BCDS client; the native bridge owns both the UDP
  * and the AMT packet sources (native-bcds-bridge selects AMT per subscribe from
@@ -2992,8 +2994,10 @@ function narrowSharedPacketIds(shared) {
  * consumable OTA standards even while the session was down. Do not re-add it:
  * the IWA derives origins FROM tuners (multicast-gateway.ts lists 'tuner' iff
  * a standard is consumable), so a non-empty `tuners` here reads as a licence
- * to put 'tuner' back into `origins` — the exact string that broke the AMT leg
- * above.
+ * to put 'tuner' back into `origins` — the second half of the BLO-35597 copy's
+ * defect, and after BLO-41252 the one arm with a message of its own
+ * ("multicast origin unsupported by IWA: amt"), reached only once the version
+ * matches.
  *
  * `networkHint` is the caller's knowledge of where the bridge runs; it is
  * required rather than defaulted.
@@ -3529,14 +3533,18 @@ async function discoverBridge(httpPort, { pairingScope, rendezvousUrl } = {}) {
   }
 
   // Desktop LAN scanning uses the same strict /health predicate and remains
-  // part of automatic discovery. It must run before the fingerprint-only
-  // explicit path below, but never accept a MoQ-only/native endpoint.
+  // part of automatic discovery, but it is no longer a rung of this ladder.
+  // It probes 254 hosts per prefix with no early exit, so when nothing answers
+  // it pays every probe to full timeout — 5.6s per /24, and 11.2s for the two
+  // blind defaults a loopback-served page falls back to, in front of first
+  // play on exactly the deployment where the bridge is most likely to be
+  // loopback or mDNS anyway (BLO-43633). The controller runs it after `load`
+  // and upgrades the transport when it lands; this ladder reports its miss now.
+  // With the sweep gone, rendezvous (rung 3) is the last rung here; a deferred
+  // sweep only adopts a LAN bridge when nothing else connected first.
   if (!hasExplicitBridge) {
-    const desktopLan = await tryDesktopLanDiscovery(httpPort);
-    if (desktopLan) return desktopLan;
-    // Rung 3 decides last: the local probes above are cheaper and need no
-    // third party. `rendezvous` is non-null only on this branch — every
-    // explicit-bridge param is a `PINNED_PARAM_KEYS` entry.
+    // `rendezvous` is non-null only on this branch — every explicit-bridge
+    // param is a `PINNED_PARAM_KEYS` entry.
     if (rendezvous) {
       return await connectRendezvousCandidate(await rendezvous, { httpPort, pairingScope });
     }
@@ -7336,6 +7344,48 @@ export function initMulticastBridge(options = {}) {
     return !!window.multicast && typeof window.multicast.subscribe === 'function';
   }
 
+  // The LAN sweep is deferred out of `discoverBridge` (see the rung it
+  // replaced). It is armed only once per pass — `lanScanPending` covers both
+  // "a load listener is waiting" and "a sweep is running", so neither a second
+  // poll nor a second `load` can stack a second 508-probe sweep on the first.
+  // A later poll re-arms it, which keeps the pre-BLO-43633 property that a
+  // bridge appearing on the LAN after page load is still discovered.
+  let lanScanPending = false;
+
+  async function runDeferredLanScan() {
+    try {
+      if (stopped || hasWindowMulticastApi()) return;
+      // Same cross-tab lock the discovery ladder holds: N tabs must not each
+      // put 508 probes on the wire for one bridge.
+      const lockOwner = tryAcquireBridgeDiscoveryLock(httpPort, { scope: discoveryScope });
+      if (!lockOwner) return;
+      let bridge = null;
+      try {
+        bridge = await attachBridgeEnrollment(await tryDesktopLanDiscovery(httpPort));
+      } finally {
+        releaseBridgeDiscoveryLock(lockOwner, { scope: discoveryScope });
+      }
+      if (!bridge || stopped || hasWindowMulticastApi()) return;
+      // Cache first: `tryConnect` is a no-op while an attempt is in flight, so
+      // the cache is what guarantees the next poll adopts this bridge.
+      writeBridgeDiscoveryCache(httpPort, bridge, { scope: discoveryScope });
+      await tryConnect({ seedBridge: bridge });
+    } catch (err) {
+      console.warn(`${TAG} Deferred LAN scan failed:`, err?.message);
+    } finally {
+      lanScanPending = false;
+    }
+  }
+
+  function startDeferredLanScan() {
+    // An explicit `?mc_bridge=` steers discovery; the ladder never swept for
+    // one and neither does this.
+    if (lanScanPending || stopped || bridgeUrlParams().has('mc_bridge')) return;
+    lanScanPending = true;
+    if (globalThis.document?.readyState === 'complete') void runDeferredLanScan();
+    else window.addEventListener('load', () => void runDeferredLanScan(), { once: true });
+  }
+
   function hasUsableReplacementSurface(surface = window.multicast) {
     if (!surface || surface === installedSurface) return false;
     try {
@@ -7390,6 +7440,7 @@ export function initMulticastBridge(options = {}) {
       ? { bridge: seedBridge, lockBusy: false, fromCache: seedFromCache }
       : await discoverBridgeCoordinated({ bypassCache });
     if (!bridge) {
+      if (!lockBusy) startDeferredLanScan();
       reportStatus({ phase: 'discovery', ok: false, reason: lockBusy ? 'lock-busy' : 'miss' });
       schedulePoll(lockBusy ? 'lock-busy' : 'miss');
       return;

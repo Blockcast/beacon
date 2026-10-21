@@ -8100,3 +8100,165 @@ test('a LAN probe names the LAN only where the enum still defines "private"', as
     });
   }
 });
+
+// BLO-43633. On a loopback-served desktop page `ipv4LanPrefix` has nothing to
+// infer, so the sweep falls back to two blind /24s: 2 x 254 probes at a 700 ms
+// timeout with no early exit, and nothing answers, so it pays all 11.2 s —
+// in front of first play, on exactly the deployment where the bridge is most
+// likely to be loopback or mDNS anyway.
+function installLoopbackDesktopPage(t, { storage = new Map(), onFetch, search = '' } = {}) {
+  const { windowScope, listeners } = makeWindowEventHarness({
+    href: `http://localhost:8080/players/shaka-msf.html${search}`,
+    origin: 'http://localhost:8080',
+    protocol: 'http:',
+    hostname: 'localhost',
+    search,
+  });
+  mockGlobal(t, 'window', windowScope);
+  mockGlobal(t, 'location', windowScope.location);
+  mockGlobal(t, 'localStorage', {
+    getItem: (key) => storage.get(key) ?? null,
+    setItem: (key, value) => storage.set(key, String(value)),
+    removeItem: (key) => storage.delete(key),
+  });
+  mockGlobal(t, 'WebTransport', class {});
+  t.mock.method(console, 'log', () => {});
+  t.mock.method(globalThis, 'fetch', onFetch);
+  return { windowScope, listeners };
+}
+
+const settle = async (turns = 4) => {
+  for (let i = 0; i < turns; i += 1) await new Promise((resolve) => setImmediate(resolve));
+};
+
+test('the blind LAN sweep never runs in front of bridge discovery (BLO-43633)', async (t) => {
+  const lanProbes = [];
+  const { windowScope } = installLoopbackDesktopPage(t, {
+    onFetch: async (url) => {
+      // Every LAN probe runs to the full timeout and never answers — the exact
+      // shape of a desktop page with no bridge on 192.168.0/1.0/24.
+      if (String(url).startsWith('http://192.168.')) {
+        lanProbes.push(String(url));
+        return new Promise(() => {});
+      }
+      throw new Error('no bridge here');
+    },
+  });
+
+  const statuses = [];
+  const controller = initMulticastBridge({ autoStart: false, onStatus: (event) => statuses.push(event) });
+  try {
+    controller.start();
+    await settle();
+
+    // Discovery must reach its verdict without a single probe on the wire. On
+    // `main` the sweep sits inside the ladder, so these probes are issued and
+    // the `discovery` status never arrives at all.
+    assert.deepEqual(lanProbes, [], 'no LAN probe may be issued before the page has loaded');
+    assert.deepEqual(
+      statuses.map(({ phase, ok, reason }) => ({ phase, ok, reason })),
+      [{ phase: 'discovery', ok: false, reason: 'miss' }],
+    );
+
+    windowScope.dispatchEvent({ type: 'load' });
+    await settle();
+    assert.ok(lanProbes.length > 0, 'the sweep still runs, once the page has loaded');
+    assert.ok(
+      lanProbes.some((url) => url.startsWith('http://192.168.1.1:33446/health')),
+      'the deferred sweep covers the default prefixes',
+    );
+  } finally {
+    controller.stop();
+  }
+});
+
+test('a bridge on a default LAN prefix is still discovered, after load (BLO-43633)', async (t) => {
+  const { windowScope } = installLoopbackDesktopPage(t, {
+    onFetch: async (url) => {
+      if (String(url) === 'http://192.168.1.5:33446/health') {
+        return jsonResponse(bcdsHealth({ fingerprint: FP_A1, localAddress: '192.168.1.5' }));
+      }
+      throw new Error('no bridge here');
+    },
+  });
+  const connectMock = t.mock.method(BridgeClient.prototype, 'connect', async function () {
+    this.connected = true;
+  });
+  t.mock.method(BridgeClient.prototype, 'disconnect', function () { this.connected = false; });
+
+  const controller = initMulticastBridge({ autoStart: false });
+  try {
+    controller.start();
+    await settle();
+    assert.equal(connectMock.mock.callCount(), 0);
+
+    windowScope.dispatchEvent({ type: 'load' });
+    await settle(8);
+
+    assert.equal(connectMock.mock.calls.at(-1)?.arguments[0], '192.168.1.5');
+    const scope = bridgeDiscoveryScopeFromInputs({ search: '' });
+    const cached = readBridgeDiscoveryCache(33446, Date.now(), undefined, scope);
+    assert.equal(cached?.status, 'found');
+    assert.equal(cached.bridge.host, '192.168.1.5');
+  } finally {
+    controller.stop();
+  }
+});
+
+// The re-entry guard is about the ARMING, not the sweep: the discovery lock
+// already makes a second concurrent sweep a no-op, so what is left to prevent
+// is one `load` listener per missed poll — which would turn a single `load`
+// into N sweeps the moment that lock lapses (its TTL is 7s, shorter than the
+// 11.2s two-prefix sweep it would have to cover).
+test('a second discovery miss before load does not arm a second sweep (BLO-43633)', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { windowScope, listeners } = installLoopbackDesktopPage(t, {
+    onFetch: async (url) => {
+      if (String(url).startsWith('http://192.168.')) return new Promise(() => {});
+      throw new Error('no bridge here');
+    },
+  });
+  const armed = () => listeners.get('load')?.size ?? 0;
+
+  const controller = initMulticastBridge({ autoStart: false });
+  try {
+    controller.start();
+    await settle();
+    assert.equal(armed(), 1);
+
+    // Let the miss backoff fire a second discovery pass, still before `load`.
+    t.mock.timers.tick(60_000);
+    await settle();
+    assert.equal(armed(), 1, 'one armed sweep, not one per missed poll');
+
+    windowScope.dispatchEvent({ type: 'load' });
+    await settle();
+  } finally {
+    controller.stop();
+  }
+});
+
+// A supplied `?mc_bridge=` is configuration, not a discovery hint, so the
+// ladder never swept for one. Deferring the sweep must not quietly give a
+// pinned page a fallback to some other bridge on its LAN.
+test('an explicit mc_bridge page never arms the deferred sweep (BLO-43633)', async (t) => {
+  const lanProbes = [];
+  const { windowScope } = installLoopbackDesktopPage(t, {
+    search: '?mc_bridge=beacon.local',
+    onFetch: async (url) => {
+      if (String(url).startsWith('http://192.168.')) lanProbes.push(String(url));
+      throw new Error('no bridge here');
+    },
+  });
+
+  const controller = initMulticastBridge({ autoStart: false });
+  try {
+    controller.start();
+    await settle();
+    windowScope.dispatchEvent({ type: 'load' });
+    await settle();
+    assert.deepEqual(lanProbes, []);
+  } finally {
+    controller.stop();
+  }
+});
