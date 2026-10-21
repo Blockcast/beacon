@@ -109,7 +109,7 @@ export interface RouteRaptorQPacket {
   toi: bigint;
   sbn: number;
   esi: number;
-  /** Exact ROUTE encoding-6 wire ID: [SBN:8][ESI:24]. */
+  /** Exact ROUTE encoding-6 wire ID: [SBN:32][reserved:8][ESI:24]. */
   payloadId: Uint8Array;
   symbol: Uint8Array;
   transferLength: number;
@@ -332,10 +332,11 @@ interface RouteRaptorQObject extends RouteRaptorQGeometry {
 }
 
 const MAX_RFC6330_TRANSFER_LENGTH = 0xffffffffff;
+const MAX_RFC6330_SBN = 0xffffffff;
 const MAX_RFC6330_ESI = 0xffffff;
 const DEFAULT_MAX_RAPTORQ_OBJECTS = 32;
 const DEFAULT_MAX_RAPTORQ_OBJECT_BYTES = 64 * 1024 * 1024;
-const DEFAULT_MAX_RAPTORQ_BLOCKS = 255;
+const DEFAULT_MAX_RAPTORQ_BLOCKS = 4096;
 const DEFAULT_MAX_RAPTORQ_SYMBOLS = 262144;
 
 function raptorqGeometry(packet: RouteRaptorQPacket, options: {
@@ -431,8 +432,9 @@ function makeBlockDecoder(module: RouteRaptorQWasmModule, object: RouteRaptorQOb
 }
 
 function makeEncodingPacket(packet: RouteRaptorQPacket): Uint8Array {
-  // fec-raptorq's decoder ABI uses the same four-byte RFC 6330 ID as ROUTE,
-  // and each block decoder is normalized to SBN zero below.
+  // fec-raptorq's decoder ABI uses a four-byte RFC 6330 ID. ROUTE's current
+  // encoding-6 wire ID is eight bytes, so normalize the block number to zero
+  // for this per-block decoder while preserving the full ID on the packet.
   const payloadId = Uint8Array.of(
     0,
     (packet.esi >>> 16) & 0xff,
@@ -469,12 +471,12 @@ function popRaptorQ(exports: RouteWasmExports): RouteRaptorQPacket {
   const symbolLength = optionalNumber(exports, exports.route_pop_raptorq_symbol_len, 0, 'symbol length');
   const symbolPointer = optionalNumber(exports, exports.route_pop_raptorq_symbol, 0, 'symbol pointer');
   const symbol = symbolLength > 0 ? copyBytes(exports, symbolPointer, symbolLength) : new Uint8Array();
-  const payloadId = Uint8Array.of(
-    sbn & 0xff,
-    (esi >>> 16) & 0xff,
-    (esi >>> 8) & 0xff,
-    esi & 0xff,
-  );
+  const payloadId = new Uint8Array(8);
+  if (sbn <= MAX_RFC6330_SBN && esi <= MAX_RFC6330_ESI) {
+    const payloadView = new DataView(payloadId.buffer);
+    payloadView.setUint32(0, sbn, false);
+    payloadView.setUint32(4, esi, false);
+  }
   return {
     tsi: uint64(exports.route_pop_raptorq_tsi?.() ?? 0),
     toi: uint64(exports.route_pop_raptorq_toi?.() ?? 0),
@@ -536,7 +538,7 @@ class RouteRaptorQCollector {
   ingest(packet: RouteRaptorQPacket): void {
     let key: string | undefined;
     try {
-      if (packet.symbol.length === 0 || !Number.isSafeInteger(packet.sbn) || packet.sbn < 0 || packet.sbn > 0xff ||
+      if (packet.symbol.length === 0 || !Number.isSafeInteger(packet.sbn) || packet.sbn < 0 || packet.sbn > MAX_RFC6330_SBN ||
           packet.esi < 0 || packet.esi > MAX_RFC6330_ESI) return;
       // The symbol bytes are the authoritative wire size. Older route.wasm
       // objects can retain the source FDT's ESLen while exposing a repair
