@@ -121,7 +121,7 @@ FTI geometry and scalar `[SBN, ESI]` fields, normalizing each source block to
 the decoder's zero-based block ID, then stores the reconstructed object at its
 FDT `contentLocation`; old route.wasm builds simply skip this
 optional path. The collector bounds browser state at 32 objects, 64 MiB per
-object, 255 source blocks per object, and 262,144 symbols per object by
+object, 4,096 decoded source blocks per object, and 262,144 symbols per object by
 default; set the `raptorq.max*` options when the service's announced geometry
 requires a different resource budget.
 

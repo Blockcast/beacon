@@ -266,7 +266,7 @@ test('rejects an out-of-range RaptorQ source block number', async () => {
   const route = routeFixture();
   const gateway = gatewayFixture();
   const fec = fakeRaptorQModule();
-  route.setPackets([packet({ sbn: 256 })]);
+  route.setPackets([packet({ sbn: 0x1_0000_0000 })]);
   const session = createRouteMabrSession({
     gateway: gateway.gateway,
     wasm: { exports: route.exports },
@@ -277,6 +277,32 @@ test('rejects an out-of-range RaptorQ source block number', async () => {
   await session.start();
   gateway.deliver();
   assert.equal(fec.decoders.length, 0);
+  await session.stop();
+});
+
+test('accepts the widened ROUTE source block number', async () => {
+  const route = routeFixture();
+  const gateway = gatewayFixture();
+  const fec = fakeRaptorQModule();
+  route.setPackets([packet({
+    sbn: 256,
+    transferLength: 1028,
+    symbolSize: 4,
+    maxSbLen: 1,
+    maxNumEs: 2,
+    contentLocation: 'live/wide.m4s',
+  })]);
+  const session = createRouteMabrSession({
+    gateway: gateway.gateway,
+    wasm: { exports: route.exports },
+    group: '239.21.4.1',
+    port: 5004,
+    raptorq: { wasm: fec.module },
+  });
+  await session.start();
+  gateway.deliver();
+  assert.equal(fec.decoders.length, 1);
+  assert.deepEqual([...fec.decoders[0].packets[0]], [0, 0, 0, 0, 9, 9, 9, 9]);
   await session.stop();
 });
 
