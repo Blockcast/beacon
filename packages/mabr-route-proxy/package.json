@@ -7,7 +7,7 @@
   "types": "./dist/index.d.ts",
   "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
   "files": ["dist"],
-  "scripts": { "build": "tsc -b", "typecheck": "tsc --noEmit", "test": "node --experimental-strip-types --test 'src/**/*.test.ts'", "test:e2e": "npm run build && node tests/route-wasm-shaka-e2e.mjs", "clean": "rm -rf dist tsconfig.tsbuildinfo" },
+  "scripts": { "build": "tsc -b", "typecheck": "tsc --noEmit", "test": "node --experimental-strip-types --test 'src/**/*.test.ts'", "test:e2e": "npm run build && node tests/route-wasm-shaka-e2e.mjs", "test:e2e:public": "npm run build && node tests/public-live-shaka-e2e.mjs", "clean": "rm -rf dist tsconfig.tsbuildinfo" },
   "keywords": ["mabr", "route", "cmaf", "dash", "hls", "shaka"],
   "license": "MIT",
   "dependencies": {},

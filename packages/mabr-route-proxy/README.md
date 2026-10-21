@@ -139,3 +139,16 @@ Set `PMG_ROOT`, `ROUTE_WASM`, `ROUTE_WASM_EXEC`, `RAPTORQ_JS`, `RAPTORQ_WASM`,
 live outside the adjacent `pim-multicast-gateway` checkout. `CHROME_PATH` is
 useful when the installed browser is available but Playwright's pinned revision
 is not.
+
+The optional public fallback check leaves its gateway silent, discovers NASA
+ISS A from the production HTTP SLT, and verifies that Shaka can still play the
+public DASH and HLS paths through ordinary HTTP:
+
+```sh
+npm run test:e2e:public
+```
+
+Set `PUBLIC_ROUTE_ORIGIN`, `PUBLIC_ROUTE_BASE_PATH`, `PUBLIC_ROUTE_SLT`,
+`PUBLIC_ROUTE_SERVICE_ID`, or `PUBLIC_ROUTE_TIMEOUT_MS` to target another
+delivery service. The default service is production NASA ISS A (`serviceId`
+`21`).
