@@ -19,14 +19,14 @@ iOS and Android adapters are not in this repository yet.
 
 ```sh
 npm install @blockcast/multicast-browser
-
-# Optional DASH/HLS mABR handoff
-npm install @blockcast/mabr-route-proxy
 ```
 
 That pulls `@blockcast/multicast-contract` with it. Install the contract alone
 if you are implementing a provider, or running the conformance suite against
 one, rather than consuming a gateway.
+
+The optional DASH/HLS mABR handoff, `@blockcast/mabr-route-proxy`, is not on
+npm yet. Build it from [`packages/mabr-route-proxy`](packages/mabr-route-proxy).
 
 ## Quickstart
 
