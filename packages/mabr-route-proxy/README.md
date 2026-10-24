@@ -141,7 +141,7 @@ useful when the installed browser is available but Playwright's pinned revision
 is not.
 
 The optional public fallback check leaves its gateway silent, discovers NASA
-ISS A (current production SLT service ID `1`) from the production HTTP SLT, and
+ISS A (current production SLT service ID `2`) from the production HTTP SLT, and
 verifies that Shaka can still play the public DASH and HLS paths through
 ordinary HTTP:
 
