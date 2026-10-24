@@ -28,11 +28,11 @@ const publicOrigin = new URL(process.env.PUBLIC_ROUTE_ORIGIN || defaultPublicOri
 const basePath = `${process.env.PUBLIC_ROUTE_BASE_PATH || '/nasa/iss/a/'}`.replace(/^\/*/, '/').replace(/\/*$/, '/');
 const baseUrl = new URL(basePath, publicOrigin).href;
 const sltUrl = new URL(process.env.PUBLIC_ROUTE_SLT || '/slt/1', publicOrigin).href;
-// Production's current SLT assigns serviceId 2 to the live NASA multicast
+// Production's current SLT assigns serviceId 1 to the live NASA multicast
 // service. Keep this overrideable because service IDs are TO-owned.
-const serviceId = process.env.PUBLIC_ROUTE_SERVICE_ID || '2';
+const serviceId = process.env.PUBLIC_ROUTE_SERVICE_ID || '1';
 const expectedGroup = process.env.PUBLIC_ROUTE_EXPECTED_GROUP ||
-  (publicOrigin === defaultPublicOrigin && basePath === '/nasa/iss/a/' && serviceId === '2' ? '232.1.1.66' : undefined);
+  (publicOrigin === defaultPublicOrigin && basePath === '/nasa/iss/a/' && serviceId === '1' ? '232.1.1.66' : undefined);
 const expectedPort = process.env.PUBLIC_ROUTE_EXPECTED_PORT
   ? Number(process.env.PUBLIC_ROUTE_EXPECTED_PORT)
   : expectedGroup ? 8000 : undefined;
