@@ -1,18 +1,19 @@
 {
   "name": "@blockcast/window-multicast-bridge",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Browser ESM polyfill that discovers a local Blockcast bridge and installs window.multicast over WebTransport.",
   "type": "module",
   "main": "./dist/multicast-bridge.js",
   "exports": {
     ".": "./dist/multicast-bridge.js",
-    "./bootstrap": "./dist/bridge-bootstrap.js"
+    "./bootstrap": "./dist/bridge-bootstrap.js",
+    "./beacon-connect": "./dist/beacon-connect.js"
   },
   "files": [
     "dist"
   ],
   "scripts": {
-    "build": "esbuild src/multicast-bridge.js src/bridge-bootstrap.js --minify --format=esm --target=es2022 --outdir=dist",
+    "build": "esbuild src/multicast-bridge.js src/bridge-bootstrap.js src/beacon-connect.js --minify --format=esm --target=es2022 --outdir=dist",
     "test": "node --test test/*.test.mjs",
     "test:dist": "node --import ./test/use-dist.mjs --test test/*.test.mjs",
     "clean": "rm -rf dist"

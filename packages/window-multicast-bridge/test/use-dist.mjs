@@ -5,6 +5,6 @@ import { registerHooks } from 'node:module';
 registerHooks({
   resolve(specifier, context, nextResolve) {
     const resolved = nextResolve(specifier, context);
-    return { ...resolved, url: resolved.url.replace(/\/src\/(multicast-bridge|bridge-bootstrap)\.js$/, '/dist/$1.js') };
+    return { ...resolved, url: resolved.url.replace(/\/src\/(multicast-bridge|bridge-bootstrap|beacon-connect)\.js$/, '/dist/$1.js') };
   },
 });

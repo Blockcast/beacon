@@ -19,6 +19,7 @@ The package ships a minified ESM build in `dist/`:
 | --- | --- | --- |
 | `.` | `dist/multicast-bridge.js` | discovery, the BCDS-v1 WebTransport client, and `window.multicast` |
 | `./bootstrap` | `dist/bridge-bootstrap.js` | the page-owned bootstrap coordinator described below |
+| `./beacon-connect` | `dist/beacon-connect.js` | the iOS Connect Beacon link, described below |
 
 Source lives in `src/`. Browsers load the built module directly, and bundlers
 can consume it as an ordinary dependency.
@@ -62,7 +63,8 @@ QUIC would read as multicast playback.
 This is a generic browser bridge with no native handoff or app-association
 contract: Universal Links, App Links, AASA/asset-links files, the `/live*`
 route, and `blockcast.network` hosts are not part of bridge discovery or
-authorization. `initMulticastBridge()` discovers a local BCDS bridge and may
+authorization. The optional `./beacon-connect` entry (below) builds Beacon's
+universal link; discovery and authorization never read it. `initMulticastBridge()` discovers a local BCDS bridge and may
 install `window.multicast` on any browser page (including a non-Blockcast
 HTTPS origin, a mobile browser page, or a local development page); it does not
 inspect the page host or pathname. Discovery uses the configured browser
@@ -74,6 +76,55 @@ Certificate pinning does not grant iOS background execution: when Beacon is
 the same-device bridge, suspending Beacon suspends that bridge for the browser.
 A separate always-running LAN gateway is independent of the phone app's
 lifecycle.
+
+## Connect Beacon (iOS)
+
+Safari finds Beacon's bridge through Beacon's Safari extension. Chrome,
+Firefox, Edge and the other iOS browsers have no extension, and WebKit blocks
+an HTTPS page's loopback `/health` probe, so discovery cannot reach Beacon from
+them. `./beacon-connect` gives any page a one-tap pairing link instead:
+
+```html
+<a id="beacon-connect" hidden>Connect Beacon</a>
+```
+
+```js
+import { initMulticastBridge } from '@blockcast/window-multicast-bridge';
+import { offerBeaconConnect } from '@blockcast/window-multicast-bridge/beacon-connect';
+
+offerBeaconConnect(document.getElementById('beacon-connect'));
+initMulticastBridge({ autoStart: true });
+```
+
+The offer follows the bridge's window events, so it works whoever builds the
+controller: this page, `createBridgeBootstrap()`, or a player library. Every
+transition `onStatus` reports is also dispatched on `window` as
+`multicast-bridge-status`, with `detail: { phase, ok, reason }` and no endpoint
+or pin. The link appears on a discovery miss or a failed connect, so a page
+that is already paired never flashes it, and a stale pin offers it again. It is
+withdrawn on `multicast-bridge-ready`. `offer.onStatus` takes the same events
+from any other feed.
+
+It is offered only on iOS, over HTTPS, in the top-level page. The tap goes to
+`https://www.blockcast.network/beacon/connect`, or to
+`https://blockcast.network/beacon/connect` from a page on `www`. `return=`
+names Chrome, Firefox or Edge; every other iOS browser, and an iPad browser
+that requests desktop sites without its product token, is returned to Safari.
+`to=` names the page, without credentials or discovery-steering fields and
+escaped to RFC 3986, as Beacon parses it. Beacon starts its bridge and reopens
+the page in that browser with the bridge's pin in the fragment.
+`initMulticastBridge()` keeps the pin as a pairing, so later visits connect
+with no tap. Beacon applies its own origin admission to `to`.
+
+iOS opens Beacon only for a navigation made while the user's tap is being
+handled, in the top-level frame, to a host other than the top-level page's.
+Keep the control a real link; the helper rebuilds its href inside the tap. The
+helper shows and hides it with `hidden`, so do not give it a `display` rule
+without a matching `[hidden] { display: none }`. When iOS does not hand the tap
+to Beacon (Beacon not installed, or a private tab, where Chrome and Firefox
+never open apps from links), it opens the web page at that address instead.
+`beaconConnectUrl()` returns the bare href for pages that render their own
+control.
 
 ## Discovery boundary
 

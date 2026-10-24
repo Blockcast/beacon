@@ -7155,6 +7155,16 @@ export function initMulticastBridge(options = {}) {
     } catch (err) {
       console.warn(`${TAG} onStatus handler threw:`, err?.message);
     }
+    // The same transitions for page code that did not build this controller,
+    // such as the `./beacon-connect` offer. Phase, outcome and reason only: the
+    // endpoint and its pin stay with `onStatus`.
+    try {
+      window.dispatchEvent?.(new CustomEvent('multicast-bridge-status', {
+        detail: { phase: event.phase, ok: event.ok, reason: event.reason },
+      }));
+    } catch (err) {
+      console.warn(`${TAG} multicast-bridge-status listener threw:`, err?.message);
+    }
   }
 
   // `onReady`/`onDisconnect` run inside the bridge's own lifecycle
