@@ -141,9 +141,8 @@ useful when the installed browser is available but Playwright's pinned revision
 is not.
 
 The optional public fallback check leaves its gateway silent, discovers NASA
-ISS A (current production SLT service ID `2`) from the production HTTP SLT, and
-verifies that Shaka can still play the public DASH and HLS paths through
-ordinary HTTP:
+ISS A from the production HTTP SLT, and verifies that Shaka can still play the
+public DASH and HLS paths through ordinary HTTP:
 
 ```sh
 npm run test:e2e:public
@@ -152,4 +151,4 @@ npm run test:e2e:public
 Set `PUBLIC_ROUTE_ORIGIN`, `PUBLIC_ROUTE_BASE_PATH`, `PUBLIC_ROUTE_SLT`,
 `PUBLIC_ROUTE_SERVICE_ID`, or `PUBLIC_ROUTE_TIMEOUT_MS` to target another
 delivery service. The default service is production NASA ISS A (`serviceId`
-`2`).
+`21`).
