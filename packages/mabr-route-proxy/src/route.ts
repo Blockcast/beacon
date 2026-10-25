@@ -776,7 +776,10 @@ export class RouteMabrSession {
       if (!this.#active || generation !== this.#sessionGeneration) return;
       const group = endpoint.group.trim();
       const source = normalizeRouteSource(endpoint.source) ??
-        (ingress === 'amt' ? slsSource : undefined);
+        (ingress === 'amt' && !this.#options.relay ? slsSource : undefined);
+      if (ingress === 'amt' && !this.#options.relay && !source) {
+        throw new RangeError('AMT DRIAD requires an SSM source for every endpoint');
+      }
       const endpointKey = `${source ?? ''}\u0000${group}\u0000${endpoint.port}`;
       if (this.#endpointKeys.has(endpointKey)) return;
       this.#endpointKeys.add(endpointKey);
@@ -792,8 +795,7 @@ export class RouteMabrSession {
           ? this.#options.relay
             ? { ...common, origin: 'amt', relay: this.#options.relay,
               relayPort: this.#options.relayPort ?? 2268 }
-            : { ...common, origin: 'amt', discovery: 'driad',
-              ...(this.#options.relayPort !== undefined ? { relayPort: this.#options.relayPort } : {}) }
+            : { ...common, origin: 'amt', discovery: 'driad' }
           : { ...common, origin: 'tuner', standard: 'atsc3', protocol: 'route' };
       try {
         const subscription = await this.#options.gateway.subscribe(config);

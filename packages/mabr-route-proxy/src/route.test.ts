@@ -403,6 +403,24 @@ test('leaves AMT relay discovery to the gateway when SLS provides an SSM source'
   await session.stop();
 });
 
+test('rejects a sourceless AMT endpoint instead of emitting a DRIAD join', async () => {
+  let subscriptions = 0;
+  const session = createRouteMabrSession({
+    gateway: { async subscribe() {
+      subscriptions++;
+      return { addEventListener() {}, removeEventListener() {}, async unsubscribe() {} };
+    } },
+    wasm: fakeWasm(),
+    ingress: 'amt',
+    endpoints: [
+      { group: '232.0.1.3', port: 1024 },
+      { group: '232.0.1.4', port: 1024, source: '192.0.2.10' },
+    ],
+  });
+  await assert.rejects(session.start(), /AMT DRIAD requires an SSM source for every endpoint/);
+  assert.equal(subscriptions, 0);
+});
+
 test('discovers AMT service bytes through a delivery-service hostname', async () => {
   const originalFetch = globalThis.fetch;
   const urls: string[] = [];
