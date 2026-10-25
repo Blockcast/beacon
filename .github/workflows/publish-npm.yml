@@ -4,7 +4,7 @@ on:
   pull_request:
   push:
     branches: [main]
-    tags: ["v*", "window-multicast-bridge-v*"]
+    tags: ["v*", "window-multicast-bridge-v*", "mabr-route-proxy-v*"]
   workflow_dispatch:
 
 # Node is pinned to an exact release, never the bare range '24' (the reasoning
@@ -101,7 +101,7 @@ jobs:
           npm pack ./packages/window-multicast-bridge --pack-destination npm-packages-bridge
           mkdir npm-packages-mabr
           npm pack ./packages/mabr-route-proxy --pack-destination npm-packages-mabr
-          ls -l npm-packages npm-packages-bridge
+          ls -l npm-packages npm-packages-bridge npm-packages-mabr
 
       # Asserted on the packed tarballs, never on the repo tree: what ships is
       # the tarball, and `files` / .npmignore decide which of the two you are
@@ -109,7 +109,7 @@ jobs:
       - name: Verify tarball contents
         run: |
           set -euo pipefail
-          for tgz in npm-packages/*.tgz npm-packages-bridge/*.tgz; do
+          for tgz in npm-packages/*.tgz npm-packages-bridge/*.tgz npm-packages-mabr/*.tgz; do
             echo "=== $tgz ==="
             # Capture the member list once rather than piping `tar` into a
             # matcher: `grep -q` exits at the first match, which SIGPIPEs tar,
