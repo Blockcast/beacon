@@ -10,6 +10,12 @@
   "scripts": { "build": "tsc -b", "typecheck": "tsc --noEmit", "test": "node --experimental-strip-types --test 'src/**/*.test.ts'", "test:e2e": "npm run build && node tests/route-wasm-shaka-e2e.mjs", "clean": "rm -rf dist tsconfig.tsbuildinfo" },
   "keywords": ["mabr", "route", "cmaf", "dash", "hls", "shaka"],
   "license": "MIT",
+  "publishConfig": { "access": "public" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Blockcast/beacon.git",
+    "directory": "packages/mabr-route-proxy"
+  },
   "dependencies": {},
   "devDependencies": { "typescript": "^5.7.0" }
 }
