@@ -212,7 +212,7 @@ jobs:
             --lib ES2022,DOM "$dir/probe.ts"
 
       # What ships is the minified dist/, not src/, so prove the packed tarball
-      # installs and its two entry points resolve and export what consumers
+      # installs and its entry points resolve and export what consumers
       # import. Registry-free: the bridge has no dependencies.
       - name: Verify the bridge installs and imports standalone
         run: |
@@ -225,7 +225,8 @@ jobs:
           node --input-type=module -e '
             const bridge = await import("@blockcast/window-multicast-bridge");
             const bootstrap = await import("@blockcast/window-multicast-bridge/bootstrap");
-            for (const [mod, name] of [[bridge, "initMulticastBridge"], [bridge, "BridgeClient"], [bootstrap, "createBridgeBootstrap"]]) {
+            const beaconConnect = await import("@blockcast/window-multicast-bridge/beacon-connect");
+            for (const [mod, name] of [[bridge, "initMulticastBridge"], [bridge, "BridgeClient"], [bootstrap, "createBridgeBootstrap"], [beaconConnect, "offerBeaconConnect"]]) {
               if (typeof mod[name] !== "function") {
                 console.error(`::error::the packed bridge does not export ${name}`);
                 process.exit(1);

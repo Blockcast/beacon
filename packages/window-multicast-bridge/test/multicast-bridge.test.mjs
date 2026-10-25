@@ -72,6 +72,8 @@ test('browser bridge is generic and has no native handoff or app-association con
   assert.match(source, /export function initMulticastBridge/);
   assert.match(source, /window\.multicast/);
   assert.doesNotMatch(source, /APP_LINK_HOSTS|APP_LINK_PATH|blockcast\.network\/live/);
+  // The opt-in Connect Beacon link lives in its own entry; discovery never loads it.
+  assert.doesNotMatch(source, /import[^;]*beacon-connect|blockcast\.network/);
   assert.match(
     readme,
     /generic browser bridge with no native handoff or app-association\ncontract: Universal Links, App Links, AASA\/asset-links files/s,
