@@ -82,6 +82,13 @@ jobs:
           npm test
           npm run test:dist
 
+      - name: Build and test the ROUTE mABR proxy
+        working-directory: packages/mabr-route-proxy
+        run: |
+          npm install --include=dev --no-audit --no-fund
+          npm run build
+          npm test
+
       - name: Pack release artifacts
         run: |
           mkdir npm-packages
@@ -92,6 +99,8 @@ jobs:
           # npm-packages/ against its tag, and the bridge's version is not that tag.
           mkdir npm-packages-bridge
           npm pack ./packages/window-multicast-bridge --pack-destination npm-packages-bridge
+          mkdir npm-packages-mabr
+          npm pack ./packages/mabr-route-proxy --pack-destination npm-packages-mabr
           ls -l npm-packages npm-packages-bridge
 
       # Asserted on the packed tarballs, never on the repo tree: what ships is
@@ -246,6 +255,13 @@ jobs:
         with:
           name: npm-packages-bridge
           path: npm-packages-bridge/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-packages-mabr
+          path: npm-packages-mabr/*.tgz
           if-no-files-found: error
           retention-days: 7
 
@@ -459,3 +475,37 @@ jobs:
 
       - name: Publish @blockcast/window-multicast-bridge
         run: npm publish ./npm-packages-bridge/blockcast-window-multicast-bridge-*.tgz --access public --provenance --loglevel silly
+
+  # The ROUTE adapter has its own version stream. Keep its tag and artifact
+  # separate from the existing v* gateway package release assertion.
+  publish-mabr:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/mabr-route-proxy-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Update npm
+        run: |
+          npm install --global npm@11
+          npm --version
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-packages-mabr
+          path: npm-packages-mabr
+      - name: Assert the tag matches the packed version
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#mabr-route-proxy-v}"
+          tgz="$(echo npm-packages-mabr/blockcast-mabr-route-proxy-*.tgz)"
+          version="$(tar -xOzf "$tgz" package/package.json | node -pe 'JSON.parse(require("fs").readFileSync(0)).version')"
+          [ "$version" = "$tag" ] || {
+            echo "::error::$tgz is $version, tag is $tag"
+            exit 1
+          }
+      - name: Publish @blockcast/mabr-route-proxy
+        run: npm publish npm-packages-mabr/blockcast-mabr-route-proxy-*.tgz --access public --provenance --loglevel silly
