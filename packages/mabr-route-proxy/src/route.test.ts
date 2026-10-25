@@ -432,7 +432,7 @@ test('discovers AMT service bytes through a delivery-service hostname', async ()
       return new Response('<ul><li><a href="7" /></li></ul>');
     }
     if (url === 'https://cdn.onprem-live-multicast.public-st.cdn.blockcast.net/slt/7') {
-      return new Response('<SLT><Server globalServiceID="nasa-iss-a"><BroadcastSvcSignaling slsProtocol="1" slsDestinationIpAddress="232.0.1.3" slsDestinationUdpPort="1024" slsSourceIpAddress="0.0.0.0" /></Server></SLT>');
+      return new Response('<SLT><Server globalServiceID="nasa-iss-a"><BroadcastSvcSignaling slsProtocol="1" slsDestinationIpAddress="232.0.1.3" slsDestinationUdpPort="1024" slsSourceIpAddress="69.25.95.198" /></Server></SLT>');
     }
     return new Response('missing', { status: 404 });
   }) as typeof fetch;
@@ -446,8 +446,6 @@ test('discovers AMT service bytes through a delivery-service hostname', async ()
       ingress: 'amt',
       sltUrl: 'https://cdn.onprem-live-multicast.public-st.cdn.blockcast.net',
       serviceId: 'nasa-iss-a',
-      relay: 'amt-relay.example.test',
-      relayPort: 2268,
     });
     await session.start();
     assert.deepEqual(urls, [
@@ -456,7 +454,7 @@ test('discovers AMT service bytes through a delivery-service hostname', async ()
     ]);
     assert.deepEqual(config, {
       origin: 'amt', group: '232.0.1.3', port: 1024,
-      consume: 'bytes', relay: 'amt-relay.example.test', relayPort: 2268,
+      source: '69.25.95.198', consume: 'bytes', discovery: 'driad',
     });
     await session.stop();
   } finally {
