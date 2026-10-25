@@ -1017,6 +1017,36 @@ test("BridgeClient.subscribe forwards amtRelayPort as amt_relay_port in subscrib
   }
 });
 
+test("BridgeClient.subscribe forwards DRIAD discovery without inventing a relay", async () => {
+  const cleanup = installBrowserGlobals();
+  try {
+    const client = new BridgeClient();
+    client.connected = true;
+    client._transport = "webtransport";
+
+    const sent = installSubscribeResponder(client, () => ({
+      subscriptionId: "server-sub-driad",
+      streamIndex: 0,
+    }));
+
+    await client.subscribe("239.1.1.1", 8000, "69.25.95.198", {
+      mode: "tunnel",
+      origin: "amt",
+      discovery: "driad",
+    });
+
+    const subscribeMsg = sent.find((m) => m.type === "subscribe");
+    assert.ok(subscribeMsg, "subscribe control message was sent");
+    assert.equal(subscribeMsg.origin, "amt");
+    assert.equal(subscribeMsg.mode, "tunnel");
+    assert.equal(subscribeMsg.discovery, "driad");
+    assert.equal(subscribeMsg.amt_relay, undefined);
+    assert.equal(subscribeMsg.amt_relay_port, undefined);
+  } finally {
+    cleanup();
+  }
+});
+
 test("bridge client reconnects when active subscriptions stop receiving packets", () => {
   const client = new BridgeClient();
   const subscriptionId = "239.21.4.1:8000";

@@ -4,6 +4,7 @@ import { FakeMulticastProvider } from '../../multicast-contract/src/fake-gateway
 import { createRouteMabrSession, type RouteGateway } from './route.ts';
 
 const encoder = new TextEncoder();
+const amtRelay = 'amt-relay.example.test';
 
 function routeWasmFixture() {
   const memory = new WebAssembly.Memory({ initial: 8 });
@@ -89,7 +90,7 @@ for (const ingress of ['native', 'amt'] as const) {
           group,
           port,
           consume: 'bytes' as const,
-          relay: '198.51.100.20',
+          relay: amtRelay,
           relayPort: 2268,
         };
     const session = createRouteMabrSession({
@@ -98,7 +99,7 @@ for (const ingress of ['native', 'amt'] as const) {
       ingress,
       group,
       port,
-      ...(ingress === 'amt' ? { relay: '198.51.100.20', relayPort: 2268 } : {}),
+      ...(ingress === 'amt' ? { relay: amtRelay, relayPort: 2268 } : {}),
       baseUrl: 'https://player.test/',
       maxEntries: 20,
     });

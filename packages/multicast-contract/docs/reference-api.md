@@ -508,8 +508,9 @@ export interface SubscribeConfigBytes {
     packetIds?: readonly number[];
 }
 /**
- * AMT relay source (Automatic Multicast Tunneling, RFC 7450). Relay discovery is
- * out of band (DRIAD, RFC 8777); the caller supplies the resolved endpoint.
+ * AMT relay source (Automatic Multicast Tunneling, RFC 7450). The caller may
+ * name a relay, or request RFC 8777 DRIAD with `discovery: 'driad'` and an SSM
+ * source. The public browser path uses DRIAD so it never needs TO credentials.
  *
  * Migration trap (freeze §3.4, measured): the retired lowercase API allowed
  * `origin` to be OPTIONAL even for AMT. A literal
@@ -519,20 +520,33 @@ export interface SubscribeConfigBytes {
  * multicast with the relay ignored. Audit every AMT call site for an explicit
  * `origin: 'amt'` rather than renaming mechanically.
  */
-export interface SubscribeConfigAmt {
+export interface SubscribeConfigAmtManual {
     group: string;
     port: number;
     /** SSM source literal (IPv4 or IPv6). Omit for ASM. */
     source?: string;
     consume: 'bytes';
     origin: 'amt';
-    /** AMT relay address — IPv4 or IPv6 literal (or DRIAD-resolved host). */
+    /** AMT relay address — DNS name or IPv4/IPv6 literal. */
     relay: string;
     /** AMT relay UDP port (RFC 7450 IANA default is 2268). */
     relayPort: number;
+    discovery?: never;
     /** MMTP packet IDs admitted to this logical consumer. Empty or omitted means all IDs. */
     packetIds?: readonly number[];
 }
+export interface SubscribeConfigAmtDriad {
+    group: string;
+    port: number;
+    source: string;
+    consume: 'bytes';
+    origin: 'amt';
+    discovery: 'driad';
+    relay?: never;
+    relayPort?: number;
+    packetIds?: readonly number[];
+}
+export type SubscribeConfigAmt = SubscribeConfigAmtManual | SubscribeConfigAmtDriad;
 /**
  * ATSC 1.0 is an MPEG-2 transport stream on an RF channel, not an IP/UDP
  * multicast flow. Its real selectors are frequency, program number, and PID, so

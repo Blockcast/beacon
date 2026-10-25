@@ -2224,6 +2224,7 @@ export function multicastBridgeTransportOptionsFromConfig(config = {}) {
   // native-only, including the omitted-origin default. AMT is tunnel-only.
   if (config.origin === 'amt') {
     opts.mode = 'tunnel';
+    if (config.discovery !== undefined) opts.discovery = config.discovery;
     if (config.relay !== undefined) opts.amtRelay = config.relay;
     if (config.relayPort !== undefined) opts.amtRelayPort = config.relayPort;
   } else if (config.origin === undefined || config.origin === 'ip-multicast') {
@@ -5137,6 +5138,7 @@ export class BridgeClient {
     if (entry.transportOpts.standard) msg.standard = entry.transportOpts.standard;
     if (entry.transportOpts.fec !== undefined) msg.fec = entry.transportOpts.fec;
     if (entry.transportOpts.mode) msg.mode = entry.transportOpts.mode;
+    if (entry.transportOpts.discovery) msg.discovery = entry.transportOpts.discovery;
     if (entry.transportOpts.amtRelay) msg.amt_relay = entry.transportOpts.amtRelay;
     if (entry.transportOpts.amtRelayPort !== undefined) msg.amt_relay_port = entry.transportOpts.amtRelayPort;
     if (entry.transportOpts.reliableBacklog) msg.reliable_backlog = entry.transportOpts.reliableBacklog;

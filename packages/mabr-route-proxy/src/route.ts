@@ -171,7 +171,7 @@ export interface RouteMabrOptions {
   serviceId?: string | number;
   /** Subscribe to media legs announced by the service SLS/S-TSID. */
   discoverEndpoints?: boolean;
-  /** Required when ingress is AMT. */
+  /** Optional AMT relay hostname/IP. Omit for RFC 8777 DRIAD when `source` is signaled. */
   relay?: string;
   relayPort?: number;
   /** ATSC 1 is retained as an explicit unsupported mode; it needs a raw-TS host feed. */
@@ -733,8 +733,12 @@ export class RouteMabrSession {
     if ((options.standard ?? 'atsc3') === 'atsc1' && ingress !== 'tuner') {
       throw new RangeError('ATSC1 is only valid with tuner ingress');
     }
-    if (ingress === 'amt' && (!options.relay || !Number.isInteger(options.relayPort) || options.relayPort! < 1 || options.relayPort! > 65535)) {
-      throw new RangeError('relay and relayPort are required for AMT ingress');
+    if (ingress === 'amt' && ((!options.relay && options.relayPort !== undefined) ||
+        (options.relayPort !== undefined &&
+          (!Number.isInteger(options.relayPort) || options.relayPort < 1 || options.relayPort > 65535)) ||
+        (!options.relay && !options.source && !options.sltUrl &&
+          !endpoints.some((endpoint) => normalizeRouteSource(endpoint.source))))) {
+      throw new RangeError('AMT ingress requires relay+relayPort, or an SSM source for RFC 8777 DRIAD');
     }
   }
 
@@ -755,15 +759,27 @@ export class RouteMabrSession {
       endpoints = [await discoverSlsEndpoint(this.#options)];
     }
     if (endpoints.length === 0) throw new RangeError('group and port (or endpoints or sltUrl) are required for ATSC 3');
+    if (ingress === 'amt' && !this.#options.relay &&
+        !endpoints.some((endpoint) => normalizeRouteSource(endpoint.source))) {
+      throw new RangeError('AMT DRIAD requires an SSM source in the discovered SLT or SLS endpoint');
+    }
     const exports = this.#options.wasm.exports;
     const discoverEndpoints = this.#options.discoverEndpoints ?? Boolean(this.#options.slsEndpoint || this.#options.sltUrl);
     const slsGroup = (this.#options.slsEndpoint?.group ?? endpoints[0]!.group).trim();
+    // Some senders omit sIpAddr on rendition RS entries even though the SLS
+    // leg has an SSM source. AMT DRIAD is source-based, so carry that source
+    // onto those rendition joins instead of falling back to ASM.
+    const slsSource = normalizeRouteSource(this.#options.slsEndpoint?.source ?? endpoints[0]?.source);
     const generation = ++this.#sessionGeneration;
     this.#lastSlsCount = undefined;
     const subscribeEndpoint = async (endpoint: RouteEndpoint): Promise<void> => {
       if (!this.#active || generation !== this.#sessionGeneration) return;
       const group = endpoint.group.trim();
-      const source = normalizeRouteSource(endpoint.source);
+      const source = normalizeRouteSource(endpoint.source) ??
+        (ingress === 'amt' && !this.#options.relay ? slsSource : undefined);
+      if (ingress === 'amt' && !this.#options.relay && !source) {
+        throw new RangeError('AMT DRIAD requires an SSM source for every endpoint');
+      }
       const endpointKey = `${source ?? ''}\u0000${group}\u0000${endpoint.port}`;
       if (this.#endpointKeys.has(endpointKey)) return;
       this.#endpointKeys.add(endpointKey);
@@ -776,7 +792,10 @@ export class RouteMabrSession {
       const config: object = ingress === 'native'
         ? { ...common, origin: 'ip-multicast' }
         : ingress === 'amt'
-          ? { ...common, origin: 'amt', relay: this.#options.relay!, relayPort: this.#options.relayPort! }
+          ? this.#options.relay
+            ? { ...common, origin: 'amt', relay: this.#options.relay,
+              relayPort: this.#options.relayPort ?? 2268 }
+            : { ...common, origin: 'amt', discovery: 'driad' }
           : { ...common, origin: 'tuner', standard: 'atsc3', protocol: 'route' };
       try {
         const subscription = await this.#options.gateway.subscribe(config);
