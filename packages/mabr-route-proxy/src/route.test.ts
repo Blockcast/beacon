@@ -352,15 +352,98 @@ test('subscribes to AMT relay bytes', async () => {
     ingress: 'amt',
     group: '239.21.4.1',
     port: 5004,
-    relay: '198.51.100.20',
+    relay: 'amt-relay.example.test',
     relayPort: 2268,
   });
   await session.start();
   assert.deepEqual(config, {
     origin: 'amt', group: '239.21.4.1', port: 5004,
-    consume: 'bytes', relay: '198.51.100.20', relayPort: 2268,
+    consume: 'bytes', relay: 'amt-relay.example.test', relayPort: 2268,
   });
   await session.stop();
+});
+
+test('allows an explicit AMT relay to use the gateway default port', async () => {
+  let config: Record<string, unknown> | undefined;
+  const session = createRouteMabrSession({
+    gateway: { async subscribe(value: object) {
+      config = value as Record<string, unknown>;
+      return { addEventListener() {}, removeEventListener() {}, async unsubscribe() {} };
+    } },
+    wasm: fakeWasm(),
+    ingress: 'amt',
+    group: '239.21.4.1',
+    port: 5004,
+    relay: 'amt-relay.example.test',
+  });
+  await session.start();
+  assert.deepEqual(config, {
+    origin: 'amt', group: '239.21.4.1', port: 5004,
+    consume: 'bytes', relay: 'amt-relay.example.test', relayPort: 2268,
+  });
+  await session.stop();
+});
+
+test('leaves AMT relay discovery to the gateway when SLS provides an SSM source', async () => {
+  let config: Record<string, unknown> | undefined;
+  const session = createRouteMabrSession({
+    gateway: { async subscribe(value: object) {
+      config = value as Record<string, unknown>;
+      return { addEventListener() {}, removeEventListener() {}, async unsubscribe() {} };
+    } },
+    wasm: fakeWasm(),
+    ingress: 'amt',
+    slsEndpoint: { group: '232.0.1.3', port: 1024, source: '192.0.2.10' },
+  });
+  await session.start();
+  assert.deepEqual(config, {
+    origin: 'amt', discovery: 'driad', group: '232.0.1.3', port: 1024,
+    source: '192.0.2.10', consume: 'bytes',
+  });
+  await session.stop();
+});
+
+test('discovers AMT service bytes through a delivery-service hostname', async () => {
+  const originalFetch = globalThis.fetch;
+  const urls: string[] = [];
+  let config: Record<string, unknown> | undefined;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    urls.push(url);
+    if (url === 'https://cdn.onprem-live-multicast.public-st.cdn.blockcast.net/slt/') {
+      return new Response('<ul><li><a href="7" /></li></ul>');
+    }
+    if (url === 'https://cdn.onprem-live-multicast.public-st.cdn.blockcast.net/slt/7') {
+      return new Response('<SLT><Server globalServiceID="nasa-iss-a"><BroadcastSvcSignaling slsProtocol="1" slsDestinationIpAddress="232.0.1.3" slsDestinationUdpPort="1024" slsSourceIpAddress="0.0.0.0" /></Server></SLT>');
+    }
+    return new Response('missing', { status: 404 });
+  }) as typeof fetch;
+  try {
+    const session = createRouteMabrSession({
+      gateway: { async subscribe(value: object) {
+        config = value as Record<string, unknown>;
+        return { addEventListener() {}, removeEventListener() {}, async unsubscribe() {} };
+      } },
+      wasm: fakeWasm(),
+      ingress: 'amt',
+      sltUrl: 'https://cdn.onprem-live-multicast.public-st.cdn.blockcast.net',
+      serviceId: 'nasa-iss-a',
+      relay: 'amt-relay.example.test',
+      relayPort: 2268,
+    });
+    await session.start();
+    assert.deepEqual(urls, [
+      'https://cdn.onprem-live-multicast.public-st.cdn.blockcast.net/slt/',
+      'https://cdn.onprem-live-multicast.public-st.cdn.blockcast.net/slt/7',
+    ]);
+    assert.deepEqual(config, {
+      origin: 'amt', group: '232.0.1.3', port: 1024,
+      consume: 'bytes', relay: 'amt-relay.example.test', relayPort: 2268,
+    });
+    await session.stop();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('subscribes one native ROUTE leg per rendition endpoint', async () => {
@@ -448,6 +531,46 @@ test('learns rendition endpoints from the service SLS S-TSID', async () => {
   await session.stop();
 });
 
+test('inherits the SLS source for AMT rendition DRIAD when S-TSID omits it', async () => {
+  const configs: Record<string, unknown>[] = [];
+  const listeners: Array<(event: CustomEvent<ArrayBuffer>) => void> = [];
+  const gateway = {
+    async subscribe(value: object) {
+      configs.push(value as Record<string, unknown>);
+      return {
+        addEventListener(_type: 'bytes', callback: (event: CustomEvent<ArrayBuffer>) => void) { listeners.push(callback); },
+        removeEventListener() {},
+        async unsubscribe() {},
+      };
+    },
+  };
+  const wasm = fakeWasm();
+  const encoder = new TextEncoder();
+  const stsid = '1|239.21.4.11|5004|0.0.0.0|239.21.4.10|0||||video|0|0|0';
+  const pointer = 3800;
+  wasm.exports.route_get_sls_count = () => 1;
+  wasm.exports.route_stsid_session_count = () => 1;
+  wasm.exports.route_stsid_session = () => {
+    new Uint8Array(wasm.exports.memory.buffer, pointer, stsid.length).set(encoder.encode(stsid));
+    return pointer;
+  };
+  wasm.exports.route_stsid_session_len = () => stsid.length;
+  const session = createRouteMabrSession({
+    gateway,
+    wasm,
+    ingress: 'amt',
+    slsEndpoint: {group: '239.21.4.10', port: 5004, source: '192.0.2.10'},
+  });
+  await session.start();
+  listeners[0]?.({detail: Uint8Array.of(1).buffer} as CustomEvent<ArrayBuffer>);
+  for (let i = 0; i < 20 && configs.length < 2; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(configs[1], {
+    origin: 'amt', discovery: 'driad', group: '239.21.4.11', port: 5004,
+    source: '192.0.2.10', consume: 'bytes',
+  });
+  await session.stop();
+});
+
 test('continues SLS rendition discovery and retries failed subscriptions', async () => {
   const configs: Record<string, unknown>[] = [];
   const listeners: Array<(event: CustomEvent<ArrayBuffer>) => void> = [];
@@ -504,6 +627,6 @@ test('continues SLS rendition discovery and retries failed subscriptions', async
 });
 
 test('rejects incomplete AMT and native ingress options', () => {
-  assert.throws(() => createRouteMabrSession({ gateway: { async subscribe() { throw new Error(); } }, wasm: fakeWasm(), ingress: 'amt', group: '239.21.4.1', port: 5004 }), /relay and relayPort/);
+  assert.throws(() => createRouteMabrSession({ gateway: { async subscribe() { throw new Error(); } }, wasm: fakeWasm(), ingress: 'amt', group: '239.21.4.1', port: 5004 }), /AMT ingress requires/);
   assert.throws(() => createRouteMabrSession({ gateway: { async subscribe() { throw new Error(); } }, wasm: fakeWasm(), ingress: 'native', port: 5004 }), /group and port/);
 });

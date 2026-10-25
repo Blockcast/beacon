@@ -16,8 +16,9 @@ const manifestUrl = new URL('live/manifest.mpd', baseUrl).href;
 const proxy = createRouteMabrSession({
   gateway: window.multicast,
   wasm: routeWasm,
-  // `toSls` is the service SLS endpoint selected by Traffic Ops. Use
-  // ingress: 'amt' plus relay/relayPort for an AMT receiver.
+  // `toSls` is the service SLS endpoint selected by the sender/TO. Use
+  // ingress: 'amt'; with an SSM source the gateway discovers the relay via
+  // RFC 8777 DNS (relay/relayPort are only an explicit override).
   ingress: 'native',
   slsEndpoint: toSls,
   discoverEndpoints: true,
@@ -47,7 +48,7 @@ leg supplies the rendition `(S,G,port)` values:
 const proxy = createRouteMabrSession({
   gateway: window.multicast,
   wasm: routeWasm,
-  ingress: 'native',                 // use 'amt' with relay/relayPort for AMT
+  ingress: 'native',                 // use 'amt' for AMT/DRIAD when SLS has an SSM source
   sltUrl: 'https://live.example/slt/',
   sltGroup: 7,                       // optional when /slt/ lists one group
   serviceId: 'nasa-iss-a',            // globalServiceID or numeric serviceId
@@ -92,7 +93,10 @@ HLS master/media playlists are cached by their signalled FDT
 Pass the handle returned by the existing loader after that loader has called
 `route_init()`.
 Set `ingress: 'native'` for DIMT (`origin: 'ip-multicast'`) or `ingress: 'amt'`
-with `relay` and `relayPort` for AMT (`origin: 'amt'`). The default
+for AMT (`origin: 'amt'`). With an SSM source from SLS, omit `relay` and
+`relayPort`; the proxy sends `discovery: 'driad'` and the gateway performs RFC
+8777 DRIAD over DNS. An explicit relay hostname/IP remains available for
+deployments without DRIAD. The default
 `ingress: 'tuner'` preserves the ATSC 3 USB/OTA path. The public
 `window.multicast` integration then consumes the ROUTE UDP bytes;
 ATSC 1 raw MPEG-TS requires a host-provided feed to `route_process_ts` and is

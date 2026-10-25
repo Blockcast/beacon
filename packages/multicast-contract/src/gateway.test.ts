@@ -101,6 +101,19 @@ test('AMT relay member constructs and narrows on origin', () => {
 	assert.equal(amt.relayPort, 2268);
 });
 
+test('AMT member can delegate relay discovery to the gateway for SSM', () => {
+	const amt: SubscribeConfigAmt = {
+		group: '232.1.1.1',
+		source: '203.0.113.5',
+		port: 5004,
+		consume: 'bytes',
+		origin: 'amt',
+		discovery: 'driad',
+	};
+	assert.equal(amt.relay, undefined);
+	assert.equal(amt.relayPort, undefined);
+});
+
 test('tuner members construct for ATSC 1.0, ATSC 3.0, DVB, and MBMS and narrow on standard', () => {
 	const atsc3: SubscribeConfigTuner = {
 		group: '224.0.23.60',

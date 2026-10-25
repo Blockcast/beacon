@@ -122,7 +122,10 @@ const sessionOptions = {
     onRecovered: (object) => log('RaptorQ recovered ' + object.contentLocation + ' ' + object.data.length),
   },
 };
-if (ingress === 'amt') Object.assign(sessionOptions, { relay: '198.51.100.20', relayPort: 2268 });
+// The browser receives a DNS-backed relay name from the public DS/SLS
+// configuration. This harness simulates the gateway, so the name need not
+// resolve; the assertion below still proves it crosses the page contract.
+if (ingress === 'amt') Object.assign(sessionOptions, { relay: 'amt-relay.example.test', relayPort: 2268 });
 const session = createRouteMabrSession(sessionOptions);
 await session.start();
 window.__gatewayConfigs = subscriptions.map(({ config }) => config);
@@ -355,8 +358,8 @@ try {
           { group: slsFixture.mediaGroup, port: slsFixture.mediaPort, source: slsFixture.mediaSource, consume: 'bytes', origin: 'ip-multicast' },
         ]
         : [
-          { group: slsFixture.slsGroup, port: slsFixture.slsPort, source: slsFixture.slsSource, consume: 'bytes', origin: 'amt', relay: '198.51.100.20', relayPort: 2268 },
-          { group: slsFixture.mediaGroup, port: slsFixture.mediaPort, source: slsFixture.mediaSource, consume: 'bytes', origin: 'amt', relay: '198.51.100.20', relayPort: 2268 },
+          { group: slsFixture.slsGroup, port: slsFixture.slsPort, source: slsFixture.slsSource, consume: 'bytes', origin: 'amt', relay: 'amt-relay.example.test', relayPort: 2268 },
+          { group: slsFixture.mediaGroup, port: slsFixture.mediaPort, source: slsFixture.mediaSource, consume: 'bytes', origin: 'amt', relay: 'amt-relay.example.test', relayPort: 2268 },
         ];
       assert.deepEqual(state.gatewayConfigs, expectedGatewayConfigs);
       console.log(`${ingress}: ${state.log.join('; ')}`);
