@@ -67,6 +67,21 @@ test("multicast bridge transport options follow the canonical origin", () => {
   );
 });
 
+test("AMT DRIAD discovery survives the page-to-bridge option mapping", () => {
+  assert.deepEqual(
+    multicastBridgeTransportOptionsFromConfig({
+      origin: "amt",
+      discovery: "driad",
+      source: "69.25.95.198",
+    }),
+    {
+      origin: "amt",
+      discovery: "driad",
+      mode: "tunnel",
+    },
+  );
+});
+
 test("lowercase bridge preserves ATSC 1.0 tuner acquisition metadata", async () => {
   const bridgeClient = makeBridgeClient();
 
