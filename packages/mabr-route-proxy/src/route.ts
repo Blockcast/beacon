@@ -231,7 +231,10 @@ async function discoverSlsEndpoint(options: RouteMabrOptions): Promise<RouteEndp
   const base = new URL(raw, globalThis.location?.href ?? 'http://localhost/');
   const basePath = base.pathname.replace(/\/+$/, '');
   const get = async (url: string): Promise<string> => {
-    const response = await globalThis.fetch(url);
+    // The DS is public HTTP discovery, not a TO control-plane endpoint. Keep
+    // browser credentials out of every LLS request even when the page has
+    // cookies for another authority.
+    const response = await globalThis.fetch(url, { credentials: 'omit', mode: 'cors' });
     if (!response.ok) throw new Error(`HTTP LLS fetch ${url} failed with ${response.status}`);
     return response.text();
   };

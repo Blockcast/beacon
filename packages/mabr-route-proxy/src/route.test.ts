@@ -424,10 +424,12 @@ test('rejects a sourceless AMT endpoint instead of emitting a DRIAD join', async
 test('discovers AMT service bytes through a delivery-service hostname', async () => {
   const originalFetch = globalThis.fetch;
   const urls: string[] = [];
+  const fetchOptions: RequestInit[] = [];
   let config: Record<string, unknown> | undefined;
-  globalThis.fetch = (async (input: RequestInfo | URL) => {
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     urls.push(url);
+    fetchOptions.push(init ?? {});
     if (url === 'https://cdn.onprem-live-multicast.public-st.cdn.blockcast.net/slt/') {
       return new Response('<ul><li><a href="7" /></li></ul>');
     }
@@ -453,6 +455,10 @@ test('discovers AMT service bytes through a delivery-service hostname', async ()
     assert.deepEqual(urls, [
       'https://cdn.onprem-live-multicast.public-st.cdn.blockcast.net/slt/',
       'https://cdn.onprem-live-multicast.public-st.cdn.blockcast.net/slt/7',
+    ]);
+    assert.deepEqual(fetchOptions, [
+      { credentials: 'omit', mode: 'cors' },
+      { credentials: 'omit', mode: 'cors' },
     ]);
     assert.deepEqual(config, {
       origin: 'amt', group: '232.0.1.3', port: 1024,
