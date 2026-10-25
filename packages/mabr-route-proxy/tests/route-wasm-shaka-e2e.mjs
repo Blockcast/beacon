@@ -122,10 +122,9 @@ const sessionOptions = {
     onRecovered: (object) => log('RaptorQ recovered ' + object.contentLocation + ' ' + object.data.length),
   },
 };
-// The browser receives a DNS-backed relay name from the public DS/SLS
-// configuration. This harness simulates the gateway, so the name need not
-// resolve; the assertion below still proves it crosses the page contract.
-if (ingress === 'amt') Object.assign(sessionOptions, { relay: 'amt-relay.example.test', relayPort: 2268 });
+// AMT discovery is relay-less in the browser contract. The SLS source is
+// carried into the gateway subscription, which resolves RFC 8777 TYPE260
+// records for that source; the DS hostname is only the HTTPS SLS authority.
 const session = createRouteMabrSession(sessionOptions);
 await session.start();
 window.__gatewayConfigs = subscriptions.map(({ config }) => config);
@@ -358,8 +357,8 @@ try {
           { group: slsFixture.mediaGroup, port: slsFixture.mediaPort, source: slsFixture.mediaSource, consume: 'bytes', origin: 'ip-multicast' },
         ]
         : [
-          { group: slsFixture.slsGroup, port: slsFixture.slsPort, source: slsFixture.slsSource, consume: 'bytes', origin: 'amt', relay: 'amt-relay.example.test', relayPort: 2268 },
-          { group: slsFixture.mediaGroup, port: slsFixture.mediaPort, source: slsFixture.mediaSource, consume: 'bytes', origin: 'amt', relay: 'amt-relay.example.test', relayPort: 2268 },
+          { group: slsFixture.slsGroup, port: slsFixture.slsPort, source: slsFixture.slsSource, consume: 'bytes', origin: 'amt', discovery: 'driad' },
+          { group: slsFixture.mediaGroup, port: slsFixture.mediaPort, source: slsFixture.mediaSource, consume: 'bytes', origin: 'amt', discovery: 'driad' },
         ];
       assert.deepEqual(state.gatewayConfigs, expectedGatewayConfigs);
       console.log(`${ingress}: ${state.log.join('; ')}`);
