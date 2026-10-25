@@ -40,8 +40,9 @@ any same-origin URL.
 
 When a network does not carry LLS on the ATSC 3 ASM group, bootstrap the
 service SLS over HTTPS. `sltUrl` is the HTTP LLS/SLT authority exposed by the
-TO-selected sender; it is used only to select the first service SLS leg. The
-browser still receives ROUTE bytes through DIMT or AMT, and the S-TSID on that
+TO-selected delivery service; it is used only to select the first service SLS
+leg. Its hostname is never used as the AMT relay. The browser still receives
+ROUTE bytes through DIMT or AMT, and the S-TSID on that
 leg supplies the rendition `(S,G,port)` values:
 
 ```ts
