@@ -7156,14 +7156,18 @@ export function initMulticastBridge(options = {}) {
       console.warn(`${TAG} onStatus handler threw:`, err?.message);
     }
     // The same transitions for page code that did not build this controller,
-    // such as the `./beacon-connect` offer. Phase, outcome and reason only: the
-    // endpoint and its pin stay with `onStatus`.
+    // such as the `./beacon-connect` offer. The endpoint and its pin stay with
+    // `onStatus`. A stopped controller's late reports stay off the window: the
+    // event carries no controller identity, so a listener could not drop them.
+    if (stopped) return;
     try {
       window.dispatchEvent?.(new CustomEvent('multicast-bridge-status', {
-        detail: { phase: event.phase, ok: event.ok, reason: event.reason },
+        detail: {
+          phase: event.phase, ok: event.ok, reason: event.reason, fromCache: event.fromCache, takeover: event.takeover,
+        },
       }));
     } catch (err) {
-      console.warn(`${TAG} multicast-bridge-status listener threw:`, err?.message);
+      console.warn(`${TAG} could not dispatch multicast-bridge-status:`, err?.message);
     }
   }
 

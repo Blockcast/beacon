@@ -87,7 +87,7 @@ export function beaconConnectUrl(windowScope = globalThis.window, { endpoints = 
  * Its href is rebuilt on every tap, so `to` names the page as it is then; the
  * navigation stays the browser's own, as iOS requires for an app link.
  * `onStatus` takes the same events from any other feed, `initMulticastBridge()`'s
- * and `createBridgeBootstrap()`'s included.
+ * and `createBridgeBootstrap()`'s included; a connect there withdraws the link.
  */
 export function offerBeaconConnect(link, { windowScope = globalThis.window, endpoints, onChange } = {}) {
   if (!link) return INERT_OFFER;
@@ -106,6 +106,10 @@ export function offerBeaconConnect(link, { windowScope = globalThis.window, endp
     return href;
   };
   const onStatus = (event) => {
+    if ((event?.phase === 'connect' && event.ok === true) || event?.state === 'connected') {
+      update(false);
+      return;
+    }
     const wanted = event?.phase === 'discovery'
       ? event.ok === false && event.reason === 'miss'
       : event?.phase === 'connect' ? event.ok === false : OFFER_REASONS.has(event?.reason);
@@ -145,28 +149,38 @@ function beaconTarget(page) {
 
 // Split the way Beacon splits: the query on `&`, the fragment on `&` and `?`.
 // A dropped field that opened a `?` route passes the `?` to the next field
-// kept, so `#/watch?fp=ab&id=7` stays `#/watch?id=7`.
+// kept, so `#/watch?fp=ab&id=7` stays `#/watch?id=7`. Once the route is open,
+// a `?` after a dropped field is still that field's value, so it goes too.
 function withoutSteering(raw, separators) {
   let kept = '';
+  let dropped = false;
   let route = false;
+  let inDroppedValue = false;
   for (const field of raw.split(new RegExp(`(?=[${separators}])`))) {
     const separator = separators.includes(field[0]) ? field[0] : '';
     const body = field.slice(separator.length);
+    if (inDroppedValue && separator === '?') continue;
     if (isSteering(body)) {
-      route ||= separator === '?';
+      const routeOpen = kept.includes('?');
+      dropped = true;
+      route ||= separator === '?' && !routeOpen;
+      inDroppedValue = routeOpen || separator === '?';
       continue;
     }
-    kept += (route ? '?' : !kept && separator === '&' ? '' : separator) + body;
+    kept += (route ? '?' : dropped && !kept && separator === '&' ? '' : separator) + body;
     route = false;
+    inDroppedValue = false;
   }
   return kept;
 }
 
+// Decoded as Beacon will see it, after escaping: a stray `%` is `%25` by
+// then, so only invalid UTF-8 still fails, and fails closed as in Beacon.
 function isSteering(field) {
   try {
-    return STEERING_KEYS.has(decodeURIComponent(field.split('=')[0]).toLowerCase());
+    return STEERING_KEYS.has(decodeURIComponent(rfc3986(field.split('=')[0])).toLowerCase());
   } catch {
-    return true; // A malformed key fails closed, as it does in Beacon.
+    return true;
   }
 }
 

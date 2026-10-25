@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import {
   BEACON_CONNECT_ENDPOINTS,
@@ -129,9 +132,17 @@ test('`to` drops what Beacon refuses and keeps the rest of the page address', ()
   const routed = beaconConnectUrl(makeWindow('https://player.example/#/watch?fp=ab&id=7'));
   assert.equal(beaconTarget(routed), 'https://player.example/#/watch?id=7');
   assert.equal(beaconTarget(beaconConnectUrl(makeWindow('https://player.example/#?fp=1&x=2'))), 'https://player.example/#?x=2');
-  // A key that cannot be decoded is dropped rather than carried into a refusal.
-  const malformed = beaconConnectUrl(makeWindow('https://player.example/#%zz=1&t=30'));
-  assert.equal(beaconTarget(malformed), 'https://player.example/#t=30');
+  // A stray `%` is escaped, not mistaken for a malformed key: anchors and
+  // routes that carry one survive. Only invalid UTF-8 fails closed.
+  assert.equal(beaconTarget(beaconConnectUrl(makeWindow('https://player.example/#%zz=1&t=30'))), 'https://player.example/#%25zz=1&t=30');
+  assert.equal(beaconTarget(beaconConnectUrl(makeWindow('https://p.example/app#/search/100%'))), 'https://p.example/app#/search/100%25');
+  assert.equal(beaconTarget(beaconConnectUrl(makeWindow('https://p.example/a?100%=yes&id=7'))), 'https://p.example/a?100%25=yes&id=7');
+  assert.equal(beaconTarget(beaconConnectUrl(makeWindow('https://p.example/a#%E9=1&t=30'))), 'https://p.example/a#t=30');
+  // A `?` inside a dropped field's value goes with it, and nothing is spliced
+  // into a neighbour's value; a page with nothing to drop keeps its bytes.
+  assert.equal(beaconTarget(beaconConnectUrl(makeWindow('https://p.example/#/w?a=1&fp=2?x=3&b=4'))), 'https://p.example/#/w?a=1&b=4');
+  assert.equal(beaconTarget(beaconConnectUrl(makeWindow('https://p.example/#/w?fp=ab?x=1&id=7'))), 'https://p.example/#/w?id=7');
+  assert.equal(beaconTarget(beaconConnectUrl(makeWindow('https://p.example/#&a=1'))), 'https://p.example/#&a=1');
   // Beacon refuses credentials, and the web fallback must not receive them.
   assert.equal(beaconTarget(beaconConnectUrl(makeWindow('https://user:pw@player.example/w'))), 'https://player.example/w');
 });
@@ -181,6 +192,30 @@ test('offer: a failed connect offers too, as a stale pin or a dropped bridge rep
   assert.equal(link.hidden, true);
   offer.onStatus({ phase: 'connect', ok: false });
   assert.equal(link.hidden, false);
+});
+
+test('offer: a connect from a fed status withdraws the link', () => {
+  const link = makeLink();
+  const offer = offerBeaconConnect(link, { windowScope: makeWindow('https://player.example/') });
+  offer.onStatus({ phase: 'discovery', ok: false, reason: 'miss' });
+  assert.equal(link.hidden, false);
+  offer.onStatus({ phase: 'connect', ok: true });
+  assert.equal(link.hidden, true);
+  offer.onStatus({ state: 'discovering', reason: 'connect-failed' });
+  offer.onStatus({ state: 'connected', reason: 'connected' });
+  assert.equal(link.hidden, true);
+});
+
+test('every pin key the bridge reads is stripped from `to`', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../src/multicast-bridge.js'), 'utf8');
+  const keys = [...source.match(/const PINNED_PARAM_KEYS = Object\.freeze\(\[([^\]]*)\]/)[1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
+  assert.ok(keys.length >= 6, keys.join());
+  for (const key of keys) {
+    for (const spelled of [key, key.toUpperCase()]) {
+      const href = beaconConnectUrl(makeWindow(`https://p.example/w?${spelled}=1&id=2#${spelled}=3&t=4`));
+      assert.equal(beaconTarget(href), 'https://p.example/w?id=2#t=4', spelled);
+    }
+  }
 });
 
 test('offer: bootstrap statuses work too', () => {
@@ -259,7 +294,8 @@ test('offer: follows a controller it did not build, through the window event', a
   controller.start();
   await new Promise((resolve) => setImmediate(resolve));
   controller.stop();
-  assert.deepEqual(statuses.at(0), { phase: 'discovery', ok: false, reason: 'miss' });
+  const { phase, ok, reason } = statuses.at(0);
+  assert.deepEqual({ phase, ok, reason }, { phase: 'discovery', ok: false, reason: 'miss' });
   assert.equal(link.hidden, false);
   assert.ok(beaconAccepts(link.href), link.href);
 });

@@ -60,11 +60,12 @@ QUIC would read as multicast playback.
 
 ## Browser-page scope
 
-This is a generic browser bridge with no native handoff or app-association
+Discovery (the `.` and `./bootstrap` entries) is a generic browser bridge with no native handoff or app-association
 contract: Universal Links, App Links, AASA/asset-links files, the `/live*`
 route, and `blockcast.network` hosts are not part of bridge discovery or
 authorization. The optional `./beacon-connect` entry (below) builds Beacon's
-universal link; discovery and authorization never read it. `initMulticastBridge()` discovers a local BCDS bridge and may
+universal link; discovery and authorization never read it.
+`initMulticastBridge()` discovers a local BCDS bridge and may
 install `window.multicast` on any browser page (including a non-Blockcast
 HTTPS origin, a mobile browser page, or a local development page); it does not
 inspect the page host or pathname. Discovery uses the configured browser
@@ -97,13 +98,19 @@ initMulticastBridge({ autoStart: true });
 ```
 
 The offer follows the bridge's window events, so it works whoever builds the
-controller: this page, `createBridgeBootstrap()`, or a player library. Every
-transition `onStatus` reports is also dispatched on `window` as
-`multicast-bridge-status`, with `detail: { phase, ok, reason }` and no endpoint
-or pin. The link appears on a discovery miss or a failed connect, so a page
-that is already paired never flashes it, and a stale pin offers it again. It is
-withdrawn on `multicast-bridge-ready`. `offer.onStatus` takes the same events
-from any other feed.
+controller in this window with this package (0.4.0 or later): this page,
+`createBridgeBootstrap()`, or a player library. While a controller runs, every
+transition `initMulticastBridge()`'s `onStatus` reports is also dispatched on
+`window` as `multicast-bridge-status`, with
+`detail: { phase, ok, reason, fromCache, takeover }` and no endpoint or pin.
+`phase` is `discovery`, `connect`, `disconnect` or `extension`; `ok` is set on
+`discovery` and `connect`; `reason` (`miss` or `lock-busy`) on a discovery
+miss. The events are not replayed, so create the offer before the controller
+starts, or feed `offer.onStatus` yourself (it also takes
+`createBridgeBootstrap()`'s own statuses, which are not dispatched). The link
+appears on a discovery miss or a failed connect, so a page that is already
+paired never flashes it, and a stale pin offers it again. It is withdrawn on
+`multicast-bridge-ready`.
 
 It is offered only on iOS, over HTTPS, in the top-level page. The tap goes to
 `https://www.blockcast.network/beacon/connect`, or to
@@ -114,7 +121,8 @@ that requests desktop sites without its product token, is returned to Safari.
 escaped to RFC 3986, as Beacon parses it. Beacon starts its bridge and reopens
 the page in that browser with the bridge's pin in the fragment.
 `initMulticastBridge()` keeps the pin as a pairing, so later visits connect
-with no tap. Beacon applies its own origin admission to `to`.
+with no tap while Beacon's bridge is running; a pin that no longer connects
+offers the link again. Beacon applies its own origin admission to `to`.
 
 iOS opens Beacon only for a navigation made while the user's tap is being
 handled, in the top-level frame, to a host other than the top-level page's.
