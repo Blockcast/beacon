@@ -508,4 +508,4 @@ jobs:
             exit 1
           }
       - name: Publish @blockcast/mabr-route-proxy
-        run: npm publish npm-packages-mabr/blockcast-mabr-route-proxy-*.tgz --access public --provenance --loglevel silly
+        run: npm publish ./npm-packages-mabr/blockcast-mabr-route-proxy-*.tgz --access public --provenance --loglevel silly
