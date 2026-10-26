@@ -64,6 +64,18 @@ function sameToi(left: bigint | number | string, right: bigint | number | string
   return String(left) === String(right);
 }
 
+interface ShakaFetchPlugin {
+  fetch_?: typeof globalThis.fetch;
+}
+
+interface ShakaGlobal {
+  net?: { HttpFetchPlugin?: ShakaFetchPlugin };
+}
+
+function shakaGlobal(): ShakaGlobal | undefined {
+  return (globalThis as typeof globalThis & { shaka?: ShakaGlobal }).shaka;
+}
+
 export class MabrRouteProxy {
   readonly #maxEntries: number;
   readonly #baseUrl: string;
@@ -178,8 +190,25 @@ export class MabrRouteProxy {
     const original = globalThis.fetch;
     this.#networkFetch = original.bind(globalThis);
     const proxy = this;
-    globalThis.fetch = function(input: RequestInfo | URL, init?: RequestInit) { return proxy.fetch(input, init); };
-    this.#restore = () => { globalThis.fetch = original; this.#restore = undefined; };
+    const patched = function(input: RequestInfo | URL, init?: RequestInit) { return proxy.fetch(input, init); };
+    globalThis.fetch = patched;
+
+    // Shaka's default Fetch plugin snapshots window.fetch when its module is
+    // loaded. Update that snapshot when Shaka was loaded before this proxy;
+    // custom fetch functions are left alone.
+    const shaka = shakaGlobal();
+    const plugin = shaka?.net?.HttpFetchPlugin;
+    const shakaOriginal = plugin?.fetch_;
+    if (plugin && shakaOriginal === original) plugin.fetch_ = patched;
+    else if (shaka && plugin && !shakaOriginal) {
+      console.warn('[mabr-route-proxy] Shaka was loaded before installFetch(), but its production Fetch plugin hides window.fetch; call installFetch() before evaluating Shaka or configure a networking plugin with proxy.fetch');
+    }
+
+    this.#restore = () => {
+      globalThis.fetch = original;
+      if (plugin && plugin.fetch_ === patched) plugin.fetch_ = shakaOriginal;
+      this.#restore = undefined;
+    };
     return this.#restore;
   }
 }

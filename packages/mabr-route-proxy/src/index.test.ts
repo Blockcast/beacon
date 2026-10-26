@@ -68,6 +68,49 @@ test('patches and restores the page fetch used by players', async () => {
   assert.equal(globalThis.fetch, original);
 });
 
+test('patches Shaka Fetch plugin when Shaka loaded before the proxy', async () => {
+  const original = globalThis.fetch;
+  const host = globalThis as typeof globalThis & {
+    shaka?: { net?: { HttpFetchPlugin?: { fetch_?: typeof globalThis.fetch } } };
+  };
+  const previousShaka = host.shaka;
+  const plugin = { fetch_: original };
+  host.shaka = { net: { HttpFetchPlugin: plugin } };
+  const proxy = new MabrRouteProxy({ baseUrl: 'https://player.test/' });
+  proxy.put({ url: 'master.mpd', data: new TextEncoder().encode('<MPD/>') });
+  const restore = proxy.installFetch();
+  try {
+    assert.notEqual(plugin.fetch_, original);
+    const response = await plugin.fetch_!('https://player.test/master.mpd');
+    assert.equal(await response.text(), '<MPD/>');
+  } finally {
+    restore();
+    host.shaka = previousShaka;
+  }
+  assert.equal(globalThis.fetch, original);
+  assert.equal(plugin.fetch_, original);
+});
+
+test('warns when a production Shaka build hides its fetch snapshot', () => {
+  const host = globalThis as typeof globalThis & {
+    shaka?: { net?: { HttpFetchPlugin?: { fetch_?: typeof globalThis.fetch } } };
+  };
+  const previousShaka = host.shaka;
+  const previousWarn = console.warn;
+  const warnings: string[] = [];
+  host.shaka = { net: { HttpFetchPlugin: {} } };
+  console.warn = (message: unknown) => warnings.push(String(message));
+  const proxy = new MabrRouteProxy({ baseUrl: 'https://player.test/' });
+  const restore = proxy.installFetch();
+  try {
+    assert.match(warnings[0] ?? '', /call installFetch\(\) before evaluating Shaka/);
+  } finally {
+    restore();
+    console.warn = previousWarn;
+    host.shaka = previousShaka;
+  }
+});
+
 test('refuses locations outside the baseUrl scope and lets them reach the network', async () => {
   const original = globalThis.fetch;
   let network = 0;

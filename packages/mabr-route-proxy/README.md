@@ -102,9 +102,12 @@ deployments without DRIAD. The default
 `window.multicast` integration then consumes the ROUTE UDP bytes;
 ATSC 1 raw MPEG-TS requires a host-provided feed to `route_process_ts` and is
 intentionally not advertised by this package.
-Shaka versions configured with an XHR networking plugin need that plugin
-pointed at `proxy.fetch`; the default Fetch plugin is intercepted by
-`installFetch()`.
+For Shaka's debug/uncompiled builds, `installFetch()` also updates the default
+Fetch plugin if Shaka was loaded first. Production compiled Shaka hides that
+fetch snapshot; call `installFetch()` before evaluating the Shaka script, or
+configure the player's custom networking plugin to call `proxy.fetch`. The
+proxy warns when it detects a previously loaded compiled build that it cannot
+patch.
 
 For route.wasm builds that expose the optional RFC 6330 symbol queue, pass the
 initialized browser sidecar from `fec-raptorq/wasm/pkg` to recover lost CMAF
