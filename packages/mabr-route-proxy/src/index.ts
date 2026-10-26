@@ -8,7 +8,7 @@ export type {
   RouteSegment,
 } from './proxy.ts';
 
-export { RouteMabrSession, createRouteMabrSession } from './route.ts';
+export { RouteMabrSession, createRouteMabrSession, discoverSlsEndpoint } from './route.ts';
 export type {
   RouteEndpoint,
   RouteGateway,

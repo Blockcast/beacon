@@ -225,7 +225,12 @@ function parseSltEndpoints(xml: string, serviceId?: string | number): RouteEndpo
   return endpoints;
 }
 
-async function discoverSlsEndpoint(options: RouteMabrOptions): Promise<RouteEndpoint> {
+/**
+ * Resolve the one service SLS bootstrap endpoint advertised by a public DS
+ * SLT/LLS URL. The returned source is the authority for AMT DRIAD; rendition
+ * groups are still learned later from the service S-TSID.
+ */
+export async function discoverSlsEndpoint(options: Pick<RouteMabrOptions, 'sltUrl' | 'sltGroup' | 'serviceId'>): Promise<RouteEndpoint> {
   const raw = options.sltUrl?.trim();
   if (!raw) throw new RangeError('sltUrl is required for HTTP LLS discovery');
   const base = new URL(raw, globalThis.location?.href ?? 'http://localhost/');
