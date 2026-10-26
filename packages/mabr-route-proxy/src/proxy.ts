@@ -64,6 +64,18 @@ function sameToi(left: bigint | number | string, right: bigint | number | string
   return String(left) === String(right);
 }
 
+interface ShakaFetchPlugin {
+  fetch_?: typeof globalThis.fetch;
+}
+
+interface ShakaGlobal {
+  net?: { HttpFetchPlugin?: ShakaFetchPlugin };
+}
+
+function shakaFetchPlugin(): ShakaFetchPlugin | undefined {
+  return (globalThis as typeof globalThis & { shaka?: ShakaGlobal }).shaka?.net?.HttpFetchPlugin;
+}
+
 export class MabrRouteProxy {
   readonly #maxEntries: number;
   readonly #baseUrl: string;
@@ -178,8 +190,21 @@ export class MabrRouteProxy {
     const original = globalThis.fetch;
     this.#networkFetch = original.bind(globalThis);
     const proxy = this;
-    globalThis.fetch = function(input: RequestInfo | URL, init?: RequestInit) { return proxy.fetch(input, init); };
-    this.#restore = () => { globalThis.fetch = original; this.#restore = undefined; };
+    const patched = function(input: RequestInfo | URL, init?: RequestInit) { return proxy.fetch(input, init); };
+    globalThis.fetch = patched;
+
+    // Shaka's default Fetch plugin snapshots window.fetch when its module is
+    // loaded. Update that snapshot when Shaka was loaded before this proxy;
+    // custom fetch functions are left alone.
+    const plugin = shakaFetchPlugin();
+    const shakaOriginal = plugin?.fetch_;
+    if (plugin && shakaOriginal === original) plugin.fetch_ = patched;
+
+    this.#restore = () => {
+      globalThis.fetch = original;
+      if (plugin && plugin.fetch_ === patched) plugin.fetch_ = shakaOriginal;
+      this.#restore = undefined;
+    };
     return this.#restore;
   }
 }
