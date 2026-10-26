@@ -1,6 +1,28 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { MabrRouteProxy } from './index.ts';
+import { discoverSlsEndpoint, MabrRouteProxy } from './index.ts';
+
+test('exports DS SLS discovery from the package entry point', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    assert.equal(String(input), 'https://ds.example.test/slt/7');
+    assert.equal(init?.credentials, 'omit');
+    assert.equal(init?.mode, 'cors');
+    return new Response('<SLT><Server globalServiceID="generic-service"><BroadcastSvcSignaling slsProtocol="1" slsDestinationIpAddress="232.1.1.66" slsDestinationUdpPort="8000" slsSourceIpAddress="69.25.95.61" /></Server></SLT>');
+  }) as typeof globalThis.fetch;
+  try {
+    assert.deepEqual(await discoverSlsEndpoint({
+      sltUrl: 'https://ds.example.test/slt/7',
+      serviceId: 'generic-service',
+    }), {
+      group: '232.1.1.66',
+      port: 8000,
+      source: '69.25.95.61',
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 test('serves cached CMAF bytes and falls through misses', async () => {
   const proxy = new MabrRouteProxy({ baseUrl: 'https://player.test/live/' });
