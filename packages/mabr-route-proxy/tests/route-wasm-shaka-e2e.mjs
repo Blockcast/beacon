@@ -16,7 +16,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import http from 'node:http';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -29,6 +29,7 @@ const routeExecPath = process.env.ROUTE_WASM_EXEC || join(pimRoot, 'packages/ats
 const raptorqJsPath = process.env.RAPTORQ_JS || join(pimRoot, 'packages/atsc3-tuner-bridge/wasm/raptorq-pkg/raptorq_wasm.js');
 const raptorqWasmPath = process.env.RAPTORQ_WASM || join(pimRoot, 'packages/atsc3-tuner-bridge/wasm/raptorq-pkg/raptorq_wasm_bg.wasm');
 const shakaPath = process.env.SHAKA_JS || join(pimRoot, 'shaka-player/dist/shaka-player.compiled.debug.js');
+const productionShakaPath = process.env.SHAKA_PRODUCTION_JS || join(pimRoot, 'shaka-player/dist/shaka-player.experimental.js');
 const assetsRoot = process.env.MEDIA_ROOT || join(pimRoot, 'shaka-player/test/test/assets');
 const playwrightPath = process.env.PLAYWRIGHT || join(pimRoot, 'node_modules/playwright/index.mjs');
 const chromePath = process.env.CHROME_PATH;
@@ -38,6 +39,10 @@ const wasmExec = readFileSync(routeExecPath);
 const raptorqJs = readFileSync(raptorqJsPath);
 const raptorqWasm = readFileSync(raptorqWasmPath);
 const shaka = readFileSync(shakaPath, 'utf8');
+const shakaVariants = [{ name: 'configured', source: shaka }];
+if (existsSync(productionShakaPath) && productionShakaPath !== shakaPath) {
+  shakaVariants.push({ name: 'production', source: readFileSync(productionShakaPath, 'utf8') });
+}
 const files = new Map([
   ['dash/dash.mpd', join(assetsRoot, 'dash-vr/dash.mpd')],
   ['dash/init.mp4', join(assetsRoot, 'dash-vr/init.mp4')],
@@ -68,13 +73,13 @@ try {
   throw new Error(`multicast SLS fixture generation failed; set MULTICAST_ROOT or build fec-raptorq: ${error.message}`);
 }
 
-const page = `<!doctype html><meta charset=utf-8><video id=v muted playsinline></video>
+const createPage = (shakaSource) => `<!doctype html><meta charset=utf-8><video id=v muted playsinline></video>
 <script>
 if (!Map.prototype.getOrInsertComputed) Map.prototype.getOrInsertComputed = function (key, factory) { if (!this.has(key)) this.set(key, factory(key)); return this.get(key); };
 window.__assets = ${JSON.stringify(encoded)};
 window.__sls = ${JSON.stringify(slsFixture.body)};
 window.__fixture = ${JSON.stringify(slsFixture)};
-window.__shaka = ${JSON.stringify(shaka)};
+window.__shaka = ${JSON.stringify(shakaSource)};
 window.__log = [];
 window.__fec = {};
 </script>
@@ -282,7 +287,9 @@ const server = http.createServer((request, response) => {
   requests.push(path);
   if (path === '/') {
     response.writeHead(200, { 'content-type': 'text/html' });
-    response.end(page);
+    const variant = new URL(`http://127.0.0.1${request.url || '/'}`).searchParams.get('shaka') || shakaVariants[0].name;
+    const selected = shakaVariants.find(({ name }) => name === variant) || shakaVariants[0];
+    response.end(createPage(selected.source));
   } else if (path === '/slt/') {
     response.writeHead(200, { 'content-type': 'text/html' });
     response.end('<a href="7">7</a>');
@@ -327,7 +334,8 @@ const browser = await chromium.launch({
   ...(chromePath ? { executablePath: chromePath } : {}),
 });
 try {
-  for (const ingress of ['native', 'amt']) {
+  for (const shakaVariant of shakaVariants) {
+    for (const ingress of ['native', 'amt']) {
     const pageHandle = await browser.newPage();
     const errors = [];
     pageHandle.on('pageerror', (error) => errors.push(error.stack || String(error)));
@@ -336,7 +344,7 @@ try {
       if (message.type() === 'error') errors.push(message.text());
     });
     try {
-      await pageHandle.goto(`http://127.0.0.1:${port}/?ingress=${ingress}`);
+      await pageHandle.goto(`http://127.0.0.1:${port}/?ingress=${ingress}&shaka=${shakaVariant.name}`);
       for (let attempt = 0; attempt < 120; attempt++) {
         if ((await pageHandle.evaluate(() => window.__done === true))) break;
         await new Promise((resolveWait) => setTimeout(resolveWait, 500));
@@ -361,9 +369,10 @@ try {
           { group: slsFixture.mediaGroup, port: slsFixture.mediaPort, source: slsFixture.mediaSource, consume: 'bytes', origin: 'amt', discovery: 'driad' },
         ];
       assert.deepEqual(state.gatewayConfigs, expectedGatewayConfigs);
-      console.log(`${ingress}: ${state.log.join('; ')}`);
+      console.log(`${shakaVariant.name}/${ingress}: ${state.log.join('; ')}`);
     } finally {
       await pageHandle.close();
+    }
     }
   }
   assert.ok(requests.includes('/slt/'), 'HTTP LLS group discovery was not requested');
