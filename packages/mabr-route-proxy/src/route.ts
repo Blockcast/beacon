@@ -208,7 +208,7 @@ function normalizeRouteSource(value?: string): string | undefined {
 
 function advertisedManifestUrl(body: string, authority: URL): string | undefined {
   const candidates: string[] = [];
-  const pattern = /<((?:[A-Za-z_][\w.-]*:)?SvcInetUrl)\b([^>]*?)(?:\/>|>([\s\S]*?)<\/\1\s*>)/gi;
+  const pattern = /<((?:[A-Za-z_][\w.-]*:)?(?:SvcInetUrl|PresentationManifest))\b([^>]*?)(?:\/>|>([\s\S]*?)<\/\1\s*>)/gi;
   for (const match of body.matchAll(pattern)) {
     const text = xmlUnescape(match[3] ?? '').trim();
     const attribute = xmlUnescape(xmlAttribute(match[2]!, 'url') || xmlAttribute(match[2]!, 'href')).trim();
@@ -219,8 +219,9 @@ function advertisedManifestUrl(body: string, authority: URL): string | undefined
   for (const candidate of candidates) {
     try {
       const parsed = new URL(candidate, authority);
-      // SvcInetUrl is consumed as the DS's public media URL. Do not allow an
-      // untrusted SLS document to redirect the page to another origin.
+      // The sender's SvcInetUrl/Blockcast PresentationManifest is consumed as
+      // the DS's public media URL. Do not allow an untrusted SLS document to
+      // redirect the page to another origin.
       if (parsed.protocol === 'https:' && parsed.origin === authority.origin) return parsed.href;
     } catch {
       // An optional malformed service URL must not hide a valid SLS leg.
@@ -280,11 +281,13 @@ export async function discoverSlsEndpoint(options: Pick<RouteMabrOptions, 'sltUr
   const sltRaw = options.sltUrl?.trim();
   const dsRaw = options.dsUrl?.trim();
   if (!sltRaw && !dsRaw) throw new RangeError('sltUrl or dsUrl is required for HTTP LLS discovery');
-  if (sltRaw && dsRaw && new URL(sltRaw).origin !== new URL(dsRaw).origin) {
+  const pageBase = globalThis.location?.href ?? 'http://localhost/';
+  const slt = sltRaw ? new URL(sltRaw, pageBase) : undefined;
+  const ds = dsRaw ? new URL(dsRaw, pageBase) : undefined;
+  if (slt && ds && slt.origin !== ds.origin) {
     throw new RangeError('sltUrl and dsUrl must use the same public DS origin');
   }
-  const raw = sltRaw ?? dsRaw!;
-  const base = new URL(raw, globalThis.location?.href ?? 'http://localhost/');
+  const base = slt ?? ds!;
   const basePath = base.pathname.replace(/\/+$/, '');
   const get = async (url: string): Promise<string> => {
     // The DS is public HTTP discovery, not a TO control-plane endpoint. Keep
@@ -311,7 +314,10 @@ export async function discoverSlsEndpoint(options: Pick<RouteMabrOptions, 'sltUr
     ? await Promise.all([...new Set(groups)].map((group) => get(new URL(String(group), sltDirectory).href)))
     : [index];
   const endpoints = documents.flatMap((document) => parseSltEndpoints(document, options.serviceId, new URL('/', base.origin)));
-  const unique = [...new Map(endpoints.map((endpoint) => [`${endpoint.source ?? ''}\0${endpoint.group}\0${endpoint.port}`, endpoint])).values()];
+  const unique = [...new Map(endpoints.map((endpoint) => [
+    `${endpoint.source ?? ''}\0${endpoint.group}\0${endpoint.port}\0${endpoint.manifestUrl ?? ''}`,
+    endpoint,
+  ])).values()];
   if (unique.length !== 1) {
     const selector = options.serviceId === undefined ? 'serviceId' : `serviceId ${String(options.serviceId)}`;
     throw new Error(`HTTP LLS advertised ${unique.length} ROUTE SLS endpoints for ${selector}; select exactly one`);
@@ -818,6 +824,7 @@ export class RouteMabrSession {
       endpoints = [await discoverSlsEndpoint(this.#options)];
     }
     if (endpoints.length === 0) throw new RangeError('group and port (or endpoints or sltUrl) are required for ATSC 3');
+    for (const endpoint of endpoints) this.#assertManifestScope(endpoint);
     if (ingress === 'amt' && !this.#options.relay &&
         !endpoints.some((endpoint) => normalizeRouteSource(endpoint.source))) {
       throw new RangeError('AMT DRIAD requires an SSM source in the discovered SLT or SLS endpoint');
@@ -903,6 +910,18 @@ export class RouteMabrSession {
     } catch (error) {
       await this.stop();
       throw error;
+    }
+  }
+
+  #assertManifestScope(endpoint: RouteEndpoint): void {
+    if (!endpoint.manifestUrl) return;
+    const baseUrl = this.#options.baseUrl ?? globalThis.location?.href ?? 'http://localhost/';
+    const scope = new URL('.', baseUrl).href;
+    const manifestUrl = new URL(endpoint.manifestUrl, baseUrl).href;
+    if (!manifestUrl.startsWith(scope)) {
+      throw new RangeError(
+        `ROUTE manifest ${manifestUrl} is outside baseUrl scope ${scope}; set baseUrl to the DS manifest directory`,
+      );
     }
   }
 

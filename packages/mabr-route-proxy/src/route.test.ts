@@ -88,6 +88,17 @@ test('feeds ROUTE objects to DASH and HLS URLs and detaches cleanly', async () =
   assert.equal(listener, undefined);
 });
 
+test('fails loudly when the discovered manifest is outside the cache scope', async () => {
+  const session = createRouteMabrSession({
+    gateway: { async subscribe() { throw new Error('must not subscribe'); } },
+    wasm: fakeWasm(),
+    ingress: 'native',
+    slsEndpoint: { group: '232.1.1.66', port: 8000, manifestUrl: 'https://ds.example/live/manifest.mpd' },
+    baseUrl: 'https://player.example/mabr/',
+  });
+  await assert.rejects(session.start(), /outside baseUrl scope/);
+});
+
 test('preserves completed ROUTE destination metadata for SLS/FDT routing', async () => {
   let listener: ((event: CustomEvent<ArrayBuffer>) => void) | undefined;
   let index = 0;
@@ -325,6 +336,7 @@ test('discovers the service SLS leg from HTTP LLS/SLT', async () => {
       ingress: 'native',
       sltUrl: 'https://relay.test',
       serviceId: 'nasa-iss',
+      baseUrl: 'https://relay.test/live/',
     });
     await session.start();
     assert.deepEqual(urls, ['https://relay.test/slt/', 'https://relay.test/slt/7']);
@@ -369,6 +381,25 @@ test('discovers an HLS manifest from a DS authority without a fixed SLT group', 
   }
 });
 
+test('discovers a TO delivery path from the Blockcast SLT extension', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(
+    '<SLT><Service globalServiceID="generic-service"><PresentationManifest xmlns="urn:blockcast:route:1">/live/manifest.mpd</PresentationManifest><BroadcastSvcSignaling slsProtocol="1" slsDestinationIpAddress="232.1.1.66" slsDestinationUdpPort="8000"/></Service></SLT>',
+  )) as typeof fetch;
+  try {
+    assert.deepEqual(await discoverSlsEndpoint({
+      sltUrl: 'https://ds.example.test/slt/7',
+      serviceId: 'generic-service',
+    }), {
+      group: '232.1.1.66',
+      port: 8000,
+      manifestUrl: 'https://ds.example.test/live/manifest.mpd',
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('accepts dsUrl as the browser discovery bootstrap', async () => {
   const originalFetch = globalThis.fetch;
   const urls: string[] = [];
@@ -382,6 +413,52 @@ test('accepts dsUrl as the browser discovery bootstrap', async () => {
     const endpoint = await discoverSlsEndpoint({dsUrl: 'https://ds.example.test', serviceId: 'generic-service'});
     assert.equal(endpoint.manifestUrl, 'https://ds.example.test/live/manifest.mpd');
     assert.deepEqual(urls, ['https://ds.example.test/slt/', 'https://ds.example.test/slt/7']);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('resolves relative discovery URLs before comparing their origins', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url === 'http://localhost/slt/7') {
+      return new Response('<SLT><Service globalServiceID="generic-service"><BroadcastSvcSignaling slsProtocol="1" slsDestinationIpAddress="232.1.1.66" slsDestinationUdpPort="8000"/></Service></SLT>');
+    }
+    return new Response('missing', {status: 404});
+  }) as typeof fetch;
+  try {
+    assert.deepEqual(await discoverSlsEndpoint({
+      sltUrl: '/slt/7',
+      dsUrl: 'http://localhost/',
+      serviceId: 'generic-service',
+    }), {
+      group: '232.1.1.66',
+      port: 8000,
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('rejects duplicate SLS legs with conflicting manifest URLs', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url === 'https://ds.example.test/slt/') return new Response('<a href="7">7</a><a href="8">8</a>');
+    if (url === 'https://ds.example.test/slt/7') {
+      return new Response('<SLT><Service globalServiceID="generic-service"><SvcInetUrl>/live/a.mpd</SvcInetUrl><BroadcastSvcSignaling slsProtocol="1" slsDestinationIpAddress="232.1.1.66" slsDestinationUdpPort="8000"/></Service></SLT>');
+    }
+    if (url === 'https://ds.example.test/slt/8') {
+      return new Response('<SLT><Service globalServiceID="generic-service"><SvcInetUrl>/live/b.mpd</SvcInetUrl><BroadcastSvcSignaling slsProtocol="1" slsDestinationIpAddress="232.1.1.66" slsDestinationUdpPort="8000"/></Service></SLT>');
+    }
+    return new Response('missing', {status: 404});
+  }) as typeof fetch;
+  try {
+    await assert.rejects(
+      discoverSlsEndpoint({sltUrl: 'https://ds.example.test', serviceId: 'generic-service'}),
+      /HTTP LLS advertised 2 ROUTE SLS endpoints/,
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }

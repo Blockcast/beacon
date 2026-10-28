@@ -9,14 +9,14 @@ CMAF objects. Shaka keeps its normal manifest and segment URLs:
 ```ts
 import { createRouteMabrSession, discoverSlsEndpoint } from '@blockcast/mabr-route-proxy';
 
-// ROUTE objects are mounted under baseUrl: an FDT Content-Location of
-// `live/manifest.mpd` is served at `${baseUrl}live/manifest.mpd`.
-const baseUrl = 'https://player.example/mabr/';
 const toSls = await discoverSlsEndpoint({
   sltUrl: 'https://live.example',
   serviceId: 'generic-service',
 });
 if (!toSls.manifestUrl) throw new Error('DS SLS did not advertise a DASH/HLS manifest');
+// ROUTE Content-Location and the public DS manifest must share this cache
+// scope; derive it from the URL signalled by the DS.
+const baseUrl = new URL('.', toSls.manifestUrl).href;
 const proxy = createRouteMabrSession({
   gateway: window.multicast,
   wasm: routeWasm,
@@ -50,22 +50,22 @@ number. The selected service's `SvcInetUrl` supplies the DASH or HLS manifest
 URL, while its SLS leg supplies the first multicast join. Its hostname is
 never used as the AMT relay. The browser still receives ROUTE bytes through
 DIMT or AMT, and the S-TSID on that leg supplies the rendition `(S,G,port)`
-values:
+values. Manifest discovery is HTTPS-only; an HTTP discovery origin can still
+be used for local testing, but it does not produce a `manifestUrl`.
 
 ```ts
+const sls = await discoverSlsEndpoint({sltUrl: 'https://live.example', serviceId: 'generic-service'});
+if (!sls.manifestUrl) throw new Error('DS SLS did not advertise a DASH/HLS manifest');
 const proxy = createRouteMabrSession({
   gateway: window.multicast,
   wasm: routeWasm,
   ingress: 'native',                 // use 'amt' for AMT/DRIAD when SLS has an SSM source
-  sltUrl: 'https://live.example',    // public DS authority; /slt/ is discovered
-  serviceId: 'generic-service',       // globalServiceID or numeric serviceId
+  slsEndpoint: sls,
   discoverEndpoints: true,
-  baseUrl,
+  baseUrl: new URL('.', sls.manifestUrl).href,
 });
 const restoreFetch = proxy.installFetch();
 await proxy.start();
-const sls = await discoverSlsEndpoint({sltUrl: 'https://live.example', serviceId: 'generic-service'});
-if (!sls.manifestUrl) throw new Error('DS SLS did not advertise a DASH/HLS manifest');
 await shakaPlayer.load(sls.manifestUrl);  // .mpd or .m3u8
 ```
 
