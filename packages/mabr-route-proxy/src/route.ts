@@ -140,6 +140,8 @@ export interface RouteEndpoint {
   group: string;
   port: number;
   source?: string;
+  /** Optional HTTP manifest advertised by the selected SLT service. */
+  manifestUrl?: string;
 }
 
 export interface RouteGateway {
@@ -165,6 +167,8 @@ export interface RouteMabrOptions {
   slsEndpoint?: RouteEndpoint;
   /** HTTP LLS/SLT endpoint used to discover the service SLS leg. */
   sltUrl?: string;
+  /** Public delivery-service origin; `/slt/` is discovered from this origin. */
+  dsUrl?: string;
   /** Optional LLS group id when `sltUrl` exposes more than one SLT. */
   sltGroup?: number;
   /** Optional numeric A/331 service id or global service id to select from SLT. */
@@ -202,7 +206,31 @@ function normalizeRouteSource(value?: string): string | undefined {
   return source;
 }
 
-function parseSltEndpoints(xml: string, serviceId?: string | number): RouteEndpoint[] {
+function advertisedManifestUrl(body: string, authority: URL): string | undefined {
+  const candidates: string[] = [];
+  const pattern = /<((?:[A-Za-z_][\w.-]*:)?(?:SvcInetUrl|PresentationManifest))\b([^>]*?)(?:\/>|>([\s\S]*?)<\/\1\s*>)/gi;
+  for (const match of body.matchAll(pattern)) {
+    const text = xmlUnescape(match[3] ?? '').trim();
+    const attribute = xmlUnescape(xmlAttribute(match[2]!, 'url') || xmlAttribute(match[2]!, 'href')).trim();
+    for (const value of [text, attribute]) {
+      if (/\.(?:mpd|m3u8)(?:[?#].*)?$/i.test(value)) candidates.push(value);
+    }
+  }
+  for (const candidate of candidates) {
+    try {
+      const parsed = new URL(candidate, authority);
+      // The sender's SvcInetUrl/Blockcast PresentationManifest is consumed as
+      // the DS's public media URL. Do not allow an untrusted SLS document to
+      // redirect the page to another origin.
+      if (parsed.protocol === 'https:' && parsed.origin === authority.origin) return parsed.href;
+    } catch {
+      // An optional malformed service URL must not hide a valid SLS leg.
+    }
+  }
+  return undefined;
+}
+
+function parseSltEndpoints(xml: string, serviceId?: string | number, authority?: URL): RouteEndpoint[] {
   const endpoints: RouteEndpoint[] = [];
   const servicePattern = /<((?:[A-Za-z_][\w.-]*:)?(?:Service|Server))\b([^>]*)>([\s\S]*?)<\/\1\s*>/gi;
   let serviceMatch: RegExpExecArray | null;
@@ -219,10 +247,29 @@ function parseSltEndpoints(xml: string, serviceId?: string | number): RouteEndpo
     const source = normalizeRouteSource(xmlUnescape(xmlAttribute(signal[2]!, 'slsSourceIpAddress')));
     const port = Number(xmlAttribute(signal[2]!, 'slsDestinationUdpPort'));
     if (group && Number.isInteger(port) && port > 0 && port <= 65535) {
-      endpoints.push({ group, port, ...(source ? { source } : {}) });
+      const manifestUrl = authority ? advertisedManifestUrl(body, authority) : undefined;
+      endpoints.push({ group, port, ...(source ? { source } : {}), ...(manifestUrl ? { manifestUrl } : {}) });
     }
   }
   return endpoints;
+}
+
+function sltGroups(index: string, sltDirectory: string): number[] {
+  const directory = new URL(sltDirectory);
+  const groups: number[] = [];
+  const links = /<a\b[^>]*\bhref\s*=\s*(["'])(.*?)\1/gi;
+  for (const match of index.matchAll(links)) {
+    try {
+      const link = new URL(xmlUnescape(match[2]!), directory);
+      if (link.origin !== directory.origin) continue;
+      const prefix = directory.pathname.endsWith('/') ? directory.pathname : `${directory.pathname}/`;
+      const relative = link.pathname.slice(prefix.length).replace(/\/+$/, '');
+      if (/^\d+$/.test(relative) && link.search === '' && link.hash === '') groups.push(Number(relative));
+    } catch {
+      // Ignore non-URL links in a directory listing.
+    }
+  }
+  return [...new Set(groups)];
 }
 
 /**
@@ -230,10 +277,17 @@ function parseSltEndpoints(xml: string, serviceId?: string | number): RouteEndpo
  * SLT/LLS URL. The returned source is the authority for AMT DRIAD; rendition
  * groups are still learned later from the service S-TSID.
  */
-export async function discoverSlsEndpoint(options: Pick<RouteMabrOptions, 'sltUrl' | 'sltGroup' | 'serviceId'>): Promise<RouteEndpoint> {
-  const raw = options.sltUrl?.trim();
-  if (!raw) throw new RangeError('sltUrl is required for HTTP LLS discovery');
-  const base = new URL(raw, globalThis.location?.href ?? 'http://localhost/');
+export async function discoverSlsEndpoint(options: Pick<RouteMabrOptions, 'sltUrl' | 'dsUrl' | 'sltGroup' | 'serviceId'>): Promise<RouteEndpoint> {
+  const sltRaw = options.sltUrl?.trim();
+  const dsRaw = options.dsUrl?.trim();
+  if (!sltRaw && !dsRaw) throw new RangeError('sltUrl or dsUrl is required for HTTP LLS discovery');
+  const pageBase = globalThis.location?.href ?? 'http://localhost/';
+  const slt = sltRaw ? new URL(sltRaw, pageBase) : undefined;
+  const ds = dsRaw ? new URL(dsRaw, pageBase) : undefined;
+  if (slt && ds && slt.origin !== ds.origin) {
+    throw new RangeError('sltUrl and dsUrl must use the same public DS origin');
+  }
+  const base = slt ?? ds!;
   const basePath = base.pathname.replace(/\/+$/, '');
   const get = async (url: string): Promise<string> => {
     // The DS is public HTTP discovery, not a TO control-plane endpoint. Keep
@@ -244,7 +298,7 @@ export async function discoverSlsEndpoint(options: Pick<RouteMabrOptions, 'sltUr
     return response.text();
   };
   if (/\/slt\/\d+$/i.test(basePath) || /\.xml$/i.test(basePath)) {
-    const endpoints = parseSltEndpoints(await get(base.href), options.serviceId);
+    const endpoints = parseSltEndpoints(await get(base.href), options.serviceId, new URL('/', base.origin));
     if (endpoints.length !== 1) throw new Error(`HTTP LLS advertised ${endpoints.length} ROUTE SLS endpoints`);
     return endpoints[0]!;
   }
@@ -254,13 +308,16 @@ export async function discoverSlsEndpoint(options: Pick<RouteMabrOptions, 'sltUr
 
   const index = await get(sltDirectory);
   const groups = options.sltGroup === undefined
-    ? [...index.matchAll(/href\s*=\s*["'](\d+)["']/gi)].map((match) => Number(match[1]))
+    ? sltGroups(index, sltDirectory)
     : [options.sltGroup];
   const documents = groups.length > 0
     ? await Promise.all([...new Set(groups)].map((group) => get(new URL(String(group), sltDirectory).href)))
     : [index];
-  const endpoints = documents.flatMap((document) => parseSltEndpoints(document, options.serviceId));
-  const unique = [...new Map(endpoints.map((endpoint) => [`${endpoint.source ?? ''}\0${endpoint.group}\0${endpoint.port}`, endpoint])).values()];
+  const endpoints = documents.flatMap((document) => parseSltEndpoints(document, options.serviceId, new URL('/', base.origin)));
+  const unique = [...new Map(endpoints.map((endpoint) => [
+    `${endpoint.source ?? ''}\0${endpoint.group}\0${endpoint.port}\0${endpoint.manifestUrl ?? ''}`,
+    endpoint,
+  ])).values()];
   if (unique.length !== 1) {
     const selector = options.serviceId === undefined ? 'serviceId' : `serviceId ${String(options.serviceId)}`;
     throw new Error(`HTTP LLS advertised ${unique.length} ROUTE SLS endpoints for ${selector}; select exactly one`);
@@ -721,7 +778,7 @@ export class RouteMabrSession {
     const ingress = options.ingress ?? 'tuner';
     const endpoints = options.slsEndpoint ? [options.slsEndpoint] : options.endpoints ?? (options.group && options.port != null ?
       [{group: options.group, port: options.port, ...(options.source ? {source: options.source} : {})}] : []);
-    if ((options.standard ?? 'atsc3') === 'atsc3' && endpoints.length === 0 && !options.sltUrl) {
+    if ((options.standard ?? 'atsc3') === 'atsc3' && endpoints.length === 0 && !options.sltUrl && !options.dsUrl) {
       throw new RangeError('group and port (or endpoints or sltUrl) are required for ATSC 3');
     }
     if (endpoints.some((endpoint) => typeof endpoint.group !== 'string' || endpoint.group.trim() === '' ||
@@ -744,7 +801,7 @@ export class RouteMabrSession {
     if (ingress === 'amt' && ((!options.relay && options.relayPort !== undefined) ||
         (options.relayPort !== undefined &&
           (!Number.isInteger(options.relayPort) || options.relayPort < 1 || options.relayPort > 65535)) ||
-        (!options.relay && !options.source && !options.sltUrl &&
+        (!options.relay && !options.source && !options.sltUrl && !options.dsUrl &&
           !endpoints.some((endpoint) => normalizeRouteSource(endpoint.source))))) {
       throw new RangeError('AMT ingress requires relay+relayPort, or an SSM source for RFC 8777 DRIAD');
     }
@@ -763,16 +820,17 @@ export class RouteMabrSession {
     const ingress = this.#options.ingress ?? 'tuner';
     let endpoints = this.#options.slsEndpoint ? [this.#options.slsEndpoint] : this.#options.endpoints ?? (this.#options.group && this.#options.port != null ?
       [{group: this.#options.group, port: this.#options.port, ...(this.#options.source ? {source: this.#options.source} : {})}] : []);
-    if (endpoints.length === 0 && this.#options.sltUrl) {
+    if (endpoints.length === 0 && (this.#options.sltUrl || this.#options.dsUrl)) {
       endpoints = [await discoverSlsEndpoint(this.#options)];
     }
     if (endpoints.length === 0) throw new RangeError('group and port (or endpoints or sltUrl) are required for ATSC 3');
+    for (const endpoint of endpoints) this.#assertManifestScope(endpoint);
     if (ingress === 'amt' && !this.#options.relay &&
         !endpoints.some((endpoint) => normalizeRouteSource(endpoint.source))) {
       throw new RangeError('AMT DRIAD requires an SSM source in the discovered SLT or SLS endpoint');
     }
     const exports = this.#options.wasm.exports;
-    const discoverEndpoints = this.#options.discoverEndpoints ?? Boolean(this.#options.slsEndpoint || this.#options.sltUrl);
+    const discoverEndpoints = this.#options.discoverEndpoints ?? Boolean(this.#options.slsEndpoint || this.#options.sltUrl || this.#options.dsUrl);
     const slsGroup = (this.#options.slsEndpoint?.group ?? endpoints[0]!.group).trim();
     // Some senders omit sIpAddr on rendition RS entries even though the SLS
     // leg has an SSM source. AMT DRIAD is source-based, so carry that source
@@ -852,6 +910,18 @@ export class RouteMabrSession {
     } catch (error) {
       await this.stop();
       throw error;
+    }
+  }
+
+  #assertManifestScope(endpoint: RouteEndpoint): void {
+    if (!endpoint.manifestUrl) return;
+    const baseUrl = this.#options.baseUrl ?? globalThis.location?.href ?? 'http://localhost/';
+    const scope = new URL('.', baseUrl).href;
+    const manifestUrl = new URL(endpoint.manifestUrl, baseUrl).href;
+    if (!manifestUrl.startsWith(scope)) {
+      throw new RangeError(
+        `ROUTE manifest ${manifestUrl} is outside baseUrl scope ${scope}; set baseUrl to the DS manifest directory`,
+      );
     }
   }
 
