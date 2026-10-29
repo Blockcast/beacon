@@ -1,5 +1,6 @@
 import {
   MabrRouteProxy,
+  rescope,
   type ByteSubscription,
   type RouteCacheEvent,
   type RouteCacheStats,
@@ -170,10 +171,8 @@ export interface RouteMabrOptions {
   endpoints?: RouteEndpoint[];
   /** The one TO-selected service SLS leg. Media legs are learned from S-TSID. */
   slsEndpoint?: RouteEndpoint;
-  /** HTTP LLS/SLT endpoint used to discover the service SLS leg. */
+  /** Public DS origin or `/slt/<group>` URL used to discover the service SLS leg and its manifest. */
   sltUrl?: string;
-  /** Public delivery-service origin; `/slt/` is discovered from this origin. */
-  dsUrl?: string;
   /** Optional LLS group id when `sltUrl` exposes more than one SLT. */
   sltGroup?: number;
   /** Optional numeric A/331 service id or global service id to select from SLT. */
@@ -185,10 +184,16 @@ export interface RouteMabrOptions {
   relayPort?: number;
   /** ATSC 1 is retained as an explicit unsupported mode; it needs a raw-TS host feed. */
   standard?: 'atsc1' | 'atsc3';
-  /** Mount point and cache scope for ROUTE Content-Location URLs: a path of its own, never the origin root. */
+  /**
+   * Base for ROUTE Content-Location URLs. Omit it and `scope` to let `start()`
+   * derive both from the DS manifest: the DS origin root and the manifest's
+   * directory.
+   */
   baseUrl?: string;
+  /** Cache scope: only URLs under this URL's directory are cached; never an origin root. Defaults to `baseUrl`. */
+  scope?: string;
   maxEntries?: number;
-  /** Called when a player request is served by ROUTE or the HTTP fallback. */
+  /** Called when a GET/HEAD is served by ROUTE or the HTTP fallback; no-store and reload requests bypass the cache unreported. */
   onCacheEvent?: (event: RouteCacheEvent) => void;
   onObject?: (object: RouteObject) => void;
   /** Optional browser-side RFC 6330 recovery for the parser's symbol queue. */
@@ -215,21 +220,22 @@ function normalizeRouteSource(value?: string): string | undefined {
 
 function advertisedManifestUrl(body: string, authority: URL): string | undefined {
   const candidates: string[] = [];
-  const pattern = /<((?:[A-Za-z_][\w.-]*:)?(?:SvcInetUrl|PresentationManifest))\b([^>]*?)(?:\/>|>([\s\S]*?)<\/\1\s*>)/gi;
+  const pattern = /<((?:[A-Za-z_][\w.-]*:)?PresentationManifest)\b([^>]*?)(?:\/>|>([\s\S]*?)<\/\1\s*>)/gi;
   for (const match of body.matchAll(pattern)) {
     const text = xmlUnescape(match[3] ?? '').trim();
     const attribute = xmlUnescape(xmlAttribute(match[2]!, 'url') || xmlAttribute(match[2]!, 'href')).trim();
     for (const value of [text, attribute]) {
+      // The suffix is what sets the MIME type, in contentType() and in players.
       if (/\.(?:mpd|m3u8)(?:[?#].*)?$/i.test(value)) candidates.push(value);
     }
   }
   for (const candidate of candidates) {
     try {
       const parsed = new URL(candidate, authority);
-      // The sender's SvcInetUrl/Blockcast PresentationManifest is consumed as
-      // the DS's public media URL. Do not allow an untrusted SLS document to
-      // redirect the page to another origin.
-      if (parsed.protocol === 'https:' && parsed.origin === authority.origin) return parsed.href;
+      // The Blockcast PresentationManifest (urn:blockcast:route:1) is the DS's
+      // public media URL. Do not allow an untrusted SLS document to redirect
+      // the page to another origin.
+      if (parsed.origin === authority.origin) return parsed.href;
     } catch {
       // An optional malformed service URL must not hide a valid SLS leg.
     }
@@ -284,23 +290,22 @@ function sltGroups(index: string, sltDirectory: string): number[] {
  * SLT/LLS URL. The returned source is the authority for AMT DRIAD; rendition
  * groups are still learned later from the service S-TSID.
  */
-export async function discoverSlsEndpoint(options: Pick<RouteMabrOptions, 'sltUrl' | 'dsUrl' | 'sltGroup' | 'serviceId'>): Promise<RouteEndpoint> {
+export async function discoverSlsEndpoint(
+  options: Pick<RouteMabrOptions, 'sltUrl' | 'sltGroup' | 'serviceId'> & { signal?: AbortSignal },
+): Promise<RouteEndpoint> {
   const sltRaw = options.sltUrl?.trim();
-  const dsRaw = options.dsUrl?.trim();
-  if (!sltRaw && !dsRaw) throw new RangeError('sltUrl or dsUrl is required for HTTP LLS discovery');
-  const pageBase = globalThis.location?.href ?? 'http://localhost/';
-  const slt = sltRaw ? new URL(sltRaw, pageBase) : undefined;
-  const ds = dsRaw ? new URL(dsRaw, pageBase) : undefined;
-  if (slt && ds && slt.origin !== ds.origin) {
-    throw new RangeError('sltUrl and dsUrl must use the same public DS origin');
-  }
-  const base = slt ?? ds!;
+  if (!sltRaw) throw new RangeError('sltUrl is required for HTTP LLS discovery');
+  const base = new URL(sltRaw, globalThis.location?.href ?? 'http://localhost/');
   const basePath = base.pathname.replace(/\/+$/, '');
   const get = async (url: string): Promise<string> => {
     // The DS is public HTTP discovery, not a TO control-plane endpoint. Keep
     // browser credentials out of every LLS request even when the page has
-    // cookies for another authority.
-    const response = await globalThis.fetch(url, { credentials: 'omit', mode: 'cors' });
+    // cookies for another authority. no-store keeps discovery off the HTTP
+    // cache and off an installed proxy, whose multicast-delivered objects
+    // must not steer the next join.
+    const response = await globalThis.fetch(url, {
+      credentials: 'omit', mode: 'cors', cache: 'no-store', signal: options.signal,
+    });
     if (!response.ok) throw new Error(`HTTP LLS fetch ${url} failed with ${response.status}`);
     return response.text();
   };
@@ -769,6 +774,8 @@ export class RouteMabrSession {
   #lastSlsCount: number | undefined;
   #sessionGeneration = 0;
   #active = false;
+  #manifestUrl: string | undefined;
+  readonly #discoveries = new Set<AbortController>();
 
   constructor(options: RouteMabrOptions) {
     this.#proxy = new MabrRouteProxy(options);
@@ -785,7 +792,7 @@ export class RouteMabrSession {
     const ingress = options.ingress ?? 'tuner';
     const endpoints = options.slsEndpoint ? [options.slsEndpoint] : options.endpoints ?? (options.group && options.port != null ?
       [{group: options.group, port: options.port, ...(options.source ? {source: options.source} : {})}] : []);
-    if ((options.standard ?? 'atsc3') === 'atsc3' && endpoints.length === 0 && !options.sltUrl && !options.dsUrl) {
+    if ((options.standard ?? 'atsc3') === 'atsc3' && endpoints.length === 0 && !options.sltUrl) {
       throw new RangeError('group and port (or endpoints or sltUrl) are required for ATSC 3');
     }
     if (endpoints.some((endpoint) => typeof endpoint.group !== 'string' || endpoint.group.trim() === '' ||
@@ -808,7 +815,7 @@ export class RouteMabrSession {
     if (ingress === 'amt' && ((!options.relay && options.relayPort !== undefined) ||
         (options.relayPort !== undefined &&
           (!Number.isInteger(options.relayPort) || options.relayPort < 1 || options.relayPort > 65535)) ||
-        (!options.relay && !options.source && !options.sltUrl && !options.dsUrl &&
+        (!options.relay && !options.source && !options.sltUrl &&
           !endpoints.some((endpoint) => normalizeRouteSource(endpoint.source))))) {
       throw new RangeError('AMT ingress requires relay+relayPort, or an SSM source for RFC 8777 DRIAD');
     }
@@ -816,6 +823,8 @@ export class RouteMabrSession {
 
   get size(): number { return this.#proxy.size; }
   get cacheStats(): RouteCacheStats { return this.#proxy.stats; }
+  /** The URL to load: the advertised manifest path resolved against the effective `baseUrl`. Set by `start()`. */
+  get manifestUrl(): string | undefined { return this.#manifestUrl; }
   installFetch(): () => void { return this.#proxy.installFetch(); }
   async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> { return this.#proxy.fetch(input, init); }
 
@@ -828,17 +837,26 @@ export class RouteMabrSession {
     const ingress = this.#options.ingress ?? 'tuner';
     let endpoints = this.#options.slsEndpoint ? [this.#options.slsEndpoint] : this.#options.endpoints ?? (this.#options.group && this.#options.port != null ?
       [{group: this.#options.group, port: this.#options.port, ...(this.#options.source ? {source: this.#options.source} : {})}] : []);
-    if (endpoints.length === 0 && (this.#options.sltUrl || this.#options.dsUrl)) {
-      endpoints = [await discoverSlsEndpoint(this.#options)];
+    if (endpoints.length === 0 && this.#options.sltUrl) {
+      const discovery = new AbortController();
+      this.#discoveries.add(discovery);
+      try {
+        const { sltUrl, sltGroup, serviceId } = this.#options;
+        endpoints = [await discoverSlsEndpoint({ sltUrl, sltGroup, serviceId, signal: discovery.signal })];
+        // stop() can land after the response arrived but before this resumes.
+        discovery.signal.throwIfAborted();
+      } finally {
+        this.#discoveries.delete(discovery);
+      }
     }
     if (endpoints.length === 0) throw new RangeError('group and port (or endpoints or sltUrl) are required for ATSC 3');
-    for (const endpoint of endpoints) this.#assertManifestScope(endpoint);
+    this.#scopeManifest(endpoints);
     if (ingress === 'amt' && !this.#options.relay &&
         !endpoints.some((endpoint) => normalizeRouteSource(endpoint.source))) {
       throw new RangeError('AMT DRIAD requires an SSM source in the discovered SLT or SLS endpoint');
     }
     const exports = this.#options.wasm.exports;
-    const discoverEndpoints = this.#options.discoverEndpoints ?? Boolean(this.#options.slsEndpoint || this.#options.sltUrl || this.#options.dsUrl);
+    const discoverEndpoints = this.#options.discoverEndpoints ?? Boolean(this.#options.slsEndpoint || this.#options.sltUrl);
     const slsGroup = (this.#options.slsEndpoint?.group ?? endpoints[0]!.group).trim();
     // Some senders omit sIpAddr on rendition RS entries even though the SLS
     // leg has an SSM source. AMT DRIAD is source-based, so carry that source
@@ -921,19 +939,42 @@ export class RouteMabrSession {
     }
   }
 
-  #assertManifestScope(endpoint: RouteEndpoint): void {
-    if (!endpoint.manifestUrl) return;
-    const baseUrl = this.#options.baseUrl ?? globalThis.location?.href ?? 'http://localhost/';
-    const scope = new URL('.', baseUrl).href;
-    const manifestUrl = new URL(endpoint.manifestUrl, baseUrl).href;
-    if (!manifestUrl.startsWith(scope)) {
-      throw new RangeError(
-        `ROUTE manifest ${manifestUrl} is outside baseUrl scope ${scope}; set baseUrl to the DS manifest directory`,
-      );
+  /**
+   * The sender labels objects with DS-root paths, so with no explicit
+   * `baseUrl` or `scope` the base is the DS origin root and the cache answers
+   * only the manifest's directory. Explicit options are used as given.
+   */
+  #scopeManifest(endpoints: RouteEndpoint[]): void {
+    this.#manifestUrl = undefined;
+    const advertised = endpoints.find((endpoint) => endpoint.manifestUrl)?.manifestUrl;
+    if (!advertised) return;
+    const pageBase = globalThis.location?.href ?? 'http://localhost/';
+    if (this.#options.baseUrl === undefined && this.#options.scope === undefined) {
+      const manifest = new URL(advertised, pageBase);
+      const root = new URL('/', manifest).href;
+      const scope = new URL('.', manifest).href;
+      if (scope === root) {
+        throw new RangeError(
+          `ROUTE manifest ${manifest.href} is at the DS origin root; pass baseUrl and scope explicitly`,
+        );
+      }
+      this.#proxy[rescope](root, scope);
+      this.#manifestUrl = manifest.href;
+      return;
     }
+    const baseUrl = this.#options.baseUrl ?? pageBase;
+    const scope = new URL('.', new URL(this.#options.scope ?? baseUrl, baseUrl)).href;
+    // Resolve the manifest like a Content-Location: its path without the leading "/".
+    const manifest = new URL(advertised, baseUrl);
+    const manifestUrl = new URL(manifest.pathname.slice(1) + manifest.search, baseUrl).href;
+    if (!manifestUrl.startsWith(scope)) {
+      throw new RangeError(`ROUTE manifest ${manifestUrl} is outside the cache scope ${scope}`);
+    }
+    this.#manifestUrl = manifestUrl;
   }
 
   async stop(): Promise<void> {
+    for (const discovery of this.#discoveries) discovery.abort();
     this.#active = false;
     this.#sessionGeneration++;
     this.#lastSlsCount = undefined;

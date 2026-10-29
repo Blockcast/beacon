@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { discoverSlsEndpoint, MabrRouteProxy } from './index.ts';
+import { rescope } from './proxy.ts';
 
 test('exports DS SLS discovery from the package entry point', async () => {
   const originalFetch = globalThis.fetch;
@@ -8,6 +9,7 @@ test('exports DS SLS discovery from the package entry point', async () => {
     assert.equal(String(input), 'https://ds.example.test/slt/7');
     assert.equal(init?.credentials, 'omit');
     assert.equal(init?.mode, 'cors');
+    assert.equal(init?.cache, 'no-store');
     return new Response('<SLT><Server globalServiceID="generic-service"><BroadcastSvcSignaling slsProtocol="1" slsDestinationIpAddress="232.1.1.66" slsDestinationUdpPort="8000" slsSourceIpAddress="69.25.95.61" /></Server></SLT>');
   }) as typeof globalThis.fetch;
   try {
@@ -165,6 +167,25 @@ test('refuses locations outside the baseUrl scope and lets them reach the networ
     assert.equal(await (await proxy.fetch('https://player.test/api/session')).text(), 'network');
     assert.equal(network, 1);
     assert.equal(proxy.put({ url: 'seg-1.m4s', data: Uint8Array.of(7) }), 'https://player.test/live/seg-1.m4s');
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('resolves against baseUrl, caches only under scope and drops entries on rescope', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () => new Response('network')) as typeof globalThis.fetch;
+  try {
+    const proxy = new MabrRouteProxy({ baseUrl: 'https://ds.test/', scope: 'https://ds.test/live/' });
+    assert.equal(proxy.put({ url: 'live/seg-1.m4s', data: Uint8Array.of(1) }), 'https://ds.test/live/seg-1.m4s');
+    assert.equal(proxy.put({ url: 'slt/9', data: Uint8Array.of(2) }), undefined);
+    assert.equal(proxy.size, 1);
+    assert.deepEqual([...new Uint8Array(await (await proxy.fetch('https://ds.test/live/seg-1.m4s')).arrayBuffer())], [1]);
+    assert.equal(await (await proxy.fetch('https://ds.test/live/seg-1.m4s', { cache: 'no-store' })).text(), 'network');
+    assert.equal(await (await proxy.fetch('https://ds.test/live/seg-1.m4s', { cache: 'reload' })).text(), 'network');
+    assert.deepEqual(proxy.stats, { hits: 1, misses: 0 });
+    proxy[rescope]('https://ds.test/', 'https://ds.test/vod/');
+    assert.equal(proxy.size, 0);
   } finally {
     globalThis.fetch = original;
   }

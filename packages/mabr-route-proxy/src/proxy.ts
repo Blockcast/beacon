@@ -56,13 +56,21 @@ export interface MabrRouteProxyOptions {
   /** Bound the cache so a stalled player cannot retain media forever. */
   maxEntries?: number;
   /**
-   * Origin for relative segment URLs, and the cache scope: only URLs under
-   * this base's directory are cached, so nothing else can be shadowed.
+   * Base for relative Content-Location and request URLs. The sender labels
+   * objects with DS-root paths, so for DS URLs this is the DS origin root.
    */
   baseUrl?: string;
-  /** Called for GET/HEAD requests; callback errors are ignored. */
+  /**
+   * Cache scope: only URLs under this URL's directory are cached and
+   * answered, so nothing else can be shadowed. Defaults to `baseUrl`.
+   */
+  scope?: string;
+  /** Called for GET/HEAD requests except no-store and reload; callback errors are ignored. */
   onCacheEvent?: (event: RouteCacheEvent) => void;
 }
+
+/** Session hook, not exported from the package: rebase and rescope the cache. */
+export const rescope = Symbol('mabr-route-proxy.rescope');
 
 function bytes(data: ArrayBuffer | ArrayBufferView): ArrayBuffer {
   if (data instanceof ArrayBuffer) return data.slice(0);
@@ -93,8 +101,8 @@ function shakaGlobal(): ShakaGlobal | undefined {
 
 export class MabrRouteProxy {
   readonly #maxEntries: number;
-  readonly #baseUrl: string;
-  readonly #scope: string;
+  #baseUrl: string;
+  #scope: string;
   readonly #entries = new Map<string, { body: ArrayBuffer; type: string }>();
   readonly #onCacheEvent: ((event: RouteCacheEvent) => void) | undefined;
   #hits = 0;
@@ -106,13 +114,20 @@ export class MabrRouteProxy {
     this.#maxEntries = options.maxEntries ?? 256;
     if (!Number.isInteger(this.#maxEntries) || this.#maxEntries < 1) throw new RangeError('maxEntries must be positive');
     this.#baseUrl = options.baseUrl ?? globalThis.location?.href ?? 'http://localhost/';
-    this.#scope = new URL('.', this.#baseUrl).href;
+    this.#scope = new URL('.', new URL(options.scope ?? this.#baseUrl, this.#baseUrl)).href;
     this.#onCacheEvent = options.onCacheEvent;
+  }
+
+  /** Replace base and scope, dropping cached entries outside the new scope. */
+  [rescope](baseUrl: string, scope: string): void {
+    this.#baseUrl = baseUrl;
+    this.#scope = new URL('.', new URL(scope, baseUrl)).href;
+    for (const url of this.#entries.keys()) if (!url.startsWith(this.#scope)) this.#entries.delete(url);
   }
 
   /**
    * Cache bytes at `segment.url`. Returns undefined, caching nothing, when the
-   * resolved URL is outside the base's directory: Content-Location arrives on
+   * resolved URL is outside the scope: Content-Location arrives on
    * unauthenticated multicast/AMT, and installFetch() answers every page GET.
    */
   put(segment: RouteSegment): string | undefined {
@@ -171,7 +186,10 @@ export class MabrRouteProxy {
 
   async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     const request = new Request(input, init);
-    if (request.method !== 'GET' && request.method !== 'HEAD') return this.#networkFetch(request);
+    // A request that bypasses caches (DS discovery sends no-store) must not
+    // be answered by objects that arrived on unauthenticated multicast.
+    if ((request.method !== 'GET' && request.method !== 'HEAD') ||
+        request.cache === 'no-store' || request.cache === 'reload') return this.#networkFetch(request);
     const url = new URL(request.url, this.#baseUrl).href;
     const hit = this.#entries.get(url);
     if (!hit) {
