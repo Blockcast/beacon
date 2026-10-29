@@ -1,6 +1,6 @@
 {
   "name": "@blockcast/mabr-route-proxy",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Small fetch proxy for serving ROUTE-delivered CMAF objects to DASH/HLS players",
   "type": "module",
   "main": "./dist/index.js",
