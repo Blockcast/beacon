@@ -7,67 +7,78 @@ ROUTE/FDT `contentLocation` as the cache key, and stores DASH/HLS manifests and
 CMAF objects. Shaka keeps its normal manifest and segment URLs:
 
 ```ts
-import { createRouteMabrSession, discoverSlsEndpoint } from '@blockcast/mabr-route-proxy';
+import { createRouteMabrSession } from '@blockcast/mabr-route-proxy';
 
-const toSls = await discoverSlsEndpoint({
-  sltUrl: 'https://live.example',
-  serviceId: 'generic-service',
-});
-if (!toSls.manifestUrl) throw new Error('DS SLS did not advertise a DASH/HLS manifest');
-// ROUTE Content-Location and the public DS manifest must share this cache
-// scope; derive it from the URL signalled by the DS.
-const baseUrl = new URL('.', toSls.manifestUrl).href;
-const proxy = createRouteMabrSession({
+const session = createRouteMabrSession({
   gateway: window.multicast,
   wasm: routeWasm,
-  // `toSls` is the service SLS endpoint selected by the public DS. Use
-  // ingress: 'amt'; with an SSM source the gateway discovers the relay via
+  // Use ingress: 'amt'; with an SSM source the gateway discovers the relay via
   // RFC 8777 DNS (relay/relayPort are only an explicit override).
   ingress: 'native',
-  slsEndpoint: toSls,
-  discoverEndpoints: true,
-  baseUrl,
+  sltUrl: 'https://live.example',   // the public delivery service (DS)
+  serviceId: 'generic-service',
   maxEntries: 300,
 });
-const restoreFetch = proxy.installFetch();
-await proxy.start();
-
-await shakaPlayer.load(toSls.manifestUrl); // DASH MPD or HLS .m3u8
+const restoreFetch = session.installFetch();
+await session.start();
+if (!session.manifestUrl) throw new Error('DS SLT did not advertise a DASH/HLS manifest');
+await shakaPlayer.load(session.manifestUrl); // DASH MPD or HLS .m3u8
 ```
 
-`baseUrl` is also the cache scope. Only Content-Location URLs under its
-directory are cached; anything else is dropped and the request goes to the
-network. ROUTE objects arrive over unauthenticated multicast or AMT, and
-`installFetch()` answers every GET the page makes, so give ROUTE a path of its
-own, never the origin root. A root `baseUrl` lets an on-path injector shadow
-any same-origin URL.
+`start()` reads the DS's `/slt/`, joins the service's SLS leg and takes the
+manifest from the service's `PresentationManifest`. The sender labels ROUTE
+objects with DS-root paths (`live/seg-1.m4s`), so the session resolves
+Content-Locations against the DS origin root and caches only URLs under the
+manifest's directory (`https://live.example/live/`). `session.manifestUrl` is
+the URL to load, and a miss goes to the DS over unicast. A manifest at the DS
+origin root makes `start()` throw; pass `baseUrl` and `scope` explicitly then.
+
+`scope` is the cache's reach: only URLs under its directory are cached and
+answered, and every other request goes to the network. It defaults to the
+directory of `baseUrl`. ROUTE objects arrive over unauthenticated multicast or
+AMT, and `installFetch()` answers every GET the page makes, so never use an
+origin root as the scope. A root scope lets an on-path injector shadow any URL
+on that origin, including the DS's `/slt/`.
 
 When a network does not carry LLS on the ATSC 3 ASM group, bootstrap the
-service SLS over HTTPS. `sltUrl` may be the public delivery-service origin or
+service SLS over HTTP. `sltUrl` may be the public delivery-service origin or
 an explicit `/slt/<group>` URL. For an origin, the library reads the public
 `/slt/` listing and fetches the advertised groups; it never assumes a group
-number. The selected service's `SvcInetUrl` supplies the DASH or HLS manifest
-URL, while its SLS leg supplies the first multicast join. Its hostname is
-never used as the AMT relay. The browser still receives ROUTE bytes through
-DIMT or AMT, and the S-TSID on that leg supplies the rendition `(S,G,port)`
-values. Manifest discovery is HTTPS-only; an HTTP discovery origin can still
-be used for local testing, but it does not produce a `manifestUrl`.
+number. The selected service's `PresentationManifest`
+(`urn:blockcast:route:1`) supplies the DASH or HLS manifest path, which must
+be on the DS's own origin; when it advertises several (for example DASH and
+HLS), the first in SLT order is used. Its SLS leg supplies the first multicast
+join. Its hostname is never used as the AMT relay. The browser still receives
+ROUTE bytes through DIMT or AMT, and the S-TSID on that leg supplies the
+rendition `(S,G,port)` values. Discovery requests are sent with
+`cache: 'no-store'`, which the proxy always passes to the network, so objects
+that arrived over multicast cannot answer them. `stop()` aborts a discovery in
+flight, and `discoverSlsEndpoint` takes the same `signal` option.
+
+To wire the leg, base and scope explicitly, discover once and pass them:
 
 ```ts
 const sls = await discoverSlsEndpoint({sltUrl: 'https://live.example', serviceId: 'generic-service'});
-if (!sls.manifestUrl) throw new Error('DS SLS did not advertise a DASH/HLS manifest');
-const proxy = createRouteMabrSession({
+if (!sls.manifestUrl) throw new Error('DS SLT did not advertise a DASH/HLS manifest');
+const session = createRouteMabrSession({
   gateway: window.multicast,
   wasm: routeWasm,
-  ingress: 'native',                 // use 'amt' for AMT/DRIAD when SLS has an SSM source
+  ingress: 'native',                             // use 'amt' for AMT/DRIAD when SLS has an SSM source
   slsEndpoint: sls,
   discoverEndpoints: true,
-  baseUrl: new URL('.', sls.manifestUrl).href,
+  baseUrl: new URL('/', sls.manifestUrl).href,   // Content-Locations are DS-root paths
+  scope: new URL('.', sls.manifestUrl).href,     // cache only the manifest's directory
 });
-const restoreFetch = proxy.installFetch();
-await proxy.start();
-await shakaPlayer.load(sls.manifestUrl);  // .mpd or .m3u8
+const restoreFetch = session.installFetch();
+await session.start();
+await shakaPlayer.load(session.manifestUrl!);   // .mpd or .m3u8
 ```
+
+Explicit `baseUrl` and `scope` are used as given; nothing is derived.
+`session.manifestUrl` is then the manifest's path resolved against `baseUrl`:
+with a page mount such as `https://player.example/mabr/` it is
+`https://player.example/mabr/live/manifest.mpd`, and a miss goes to that
+mount, which needs a reverse proxy to the DS.
 
 The client fetches `/slt/` to list access groups, then `/slt/<group>` to read
 the SLT XML and select the service's `slsProtocol="1"` ROUTE
@@ -85,21 +96,23 @@ const proxy = createRouteMabrSession({
   gateway: window.multicast,
   wasm: routeWasm,
   ingress: 'native',
-  slsEndpoint: toSls,
+  slsEndpoint: sls,                  // the TO-selected leg, e.g. from discoverSlsEndpoint()
   discoverEndpoints: true,
 });
 ```
 
 The proxy patches only `fetch`, returns a normal `Response`, and falls through
-to the network on a cache miss. Use `cacheStats` or `onCacheEvent` to make that
-fallback visible to telemetry; the callback is best-effort and never changes
-playback behavior:
+to the network on a cache miss and for requests sent with `cache: 'no-store'`
+or `'reload'`. Use `cacheStats` or `onCacheEvent` to make cache-miss fallback
+visible to telemetry; the callback is best-effort, never changes playback
+behavior and does not see `no-store` or `reload` requests:
 
 ```ts
 const proxy = createRouteMabrSession({
   gateway: window.multicast,
   wasm: routeWasm,
-  baseUrl,
+  sltUrl: 'https://live.example',
+  serviceId: 'generic-service',
   onCacheEvent: ({ outcome, transport, url }) => {
     metrics.count(`mabr.route.${outcome}`, 1, { transport, url });
   },
@@ -141,8 +154,8 @@ const proxy = createRouteMabrSession({
   gateway: window.multicast,
   wasm: routeWasm,
   ingress: 'native',
-  slsEndpoint: toSls,
-  discoverEndpoints: true,
+  sltUrl: 'https://live.example',
+  serviceId: 'generic-service',
   raptorq: { wasm: raptorqWasm },
 });
 ```
