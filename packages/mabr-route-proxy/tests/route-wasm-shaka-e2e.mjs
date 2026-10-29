@@ -89,7 +89,11 @@ const log = (value) => window.__log.push(String(value));
 const assets = window.__assets;
 const fixture = window.__fixture;
 const sls = Uint8Array.from(atob(window.__sls), (value) => value.charCodeAt(0));
-const ingress = new URL(location.href).searchParams.get('ingress') || 'native';
+const params = new URL(location.href).searchParams;
+const ingress = params.get('ingress') || 'native';
+// The derived pass passes no baseUrl: start() takes the DS origin root and
+// the PresentationManifest's directory, and Shaka loads session.manifestUrl.
+const derived = params.get('mode') === 'derived';
 const { createRouteMabrSession } = await import('/mabr-route-proxy/index.js');
 const rqModule = await import('/rq/raptorq_wasm.js');
 await rqModule.default('/rq/raptorq_wasm_bg.wasm');
@@ -121,7 +125,7 @@ const sessionOptions = {
   sltUrl: location.origin + '/slt/',
   serviceId: 'nasa-iss-a',
   discoverEndpoints: true,
-  baseUrl: location.origin + '/mabr/',
+  ...(derived ? {} : { baseUrl: location.origin + '/mabr/' }),
   raptorq: {
     wasm: { RaptorQDecoder: rqModule.RaptorQDecoder },
     onRecovered: (object) => log('RaptorQ recovered ' + object.contentLocation + ' ' + object.data.length),
@@ -132,6 +136,9 @@ const sessionOptions = {
 // records for that source; the DS hostname is only the HTTPS SLS authority.
 const session = createRouteMabrSession(sessionOptions);
 await session.start();
+if (derived && session.manifestUrl !== location.origin + '/dash/dash.mpd') {
+  throw new Error('derived manifestUrl=' + session.manifestUrl);
+}
 window.__gatewayConfigs = subscriptions.map(({ config }) => config);
 session.installFetch();
 const send = (group, packet) => {
@@ -224,44 +231,47 @@ for (const [location, base64] of Object.entries(assets)) {
   sendObject(fixture.mediaGroup, Object.keys(assets).indexOf(location) + 1, location.endsWith('.mpd') || location.endsWith('.m3u8') ? 3 : location.endsWith('init.mp4') ? 5 : 8, Uint8Array.from(atob(base64), (value) => value.charCodeAt(0)));
 }
 
-// Build a real RFC 6330 codeword for the HLS CMAF segment, drop one source
-// symbol, and feed the repair symbols through route.wasm's encoding-6 queue.
-// The FDT still advertises the original transfer length/location, so only the
-// browser sidecar can make this player request succeed.
-const fecLocation = 'hls/hls11.m4s';
-const recovered = Uint8Array.from(atob(assets[fecLocation]), (value) => value.charCodeAt(0));
-const fecEncoder = new rqModule.RaptorQEncoder(recovered, 1200, 4, 1, 1, 8);
-const sourcePackets = fecEncoder.get_source_packets(0);
-const repairPackets = fecEncoder.get_repair_packets(0, 0, 4);
-const fecPacketSize = fecEncoder.packet_size();
-const maxSourceBlockLength = sourcePackets.length / fecPacketSize;
-const maxEncodingSymbols = maxSourceBlockLength + repairPackets.length / fecPacketSize;
-const fecToi = Object.keys(assets).indexOf(fecLocation) + 1;
-window.__fec = { location: fecLocation, toi: fecToi, transferLength: recovered.length, sourceSymbols: maxSourceBlockLength, droppedSource: 1, repairSymbols: repairPackets.length / fecPacketSize };
-const sendRaptorQ = (blob, skipSourceIndex = -1) => {
-  for (let offset = 0, index = 0; offset < blob.length; offset += fecPacketSize, index++) {
-    if (index === skipSourceIndex) continue;
-    const localPacket = blob.slice(offset, offset + fecPacketSize);
-    // ROUTE/RFC 6330 encoding 6 carries [SBN:8|ESI:24].
-    const packet = localPacket;
-    // RaptorQ symbols are one object-wide repair plane. The close-object
-    // marker is sent by the ROUTE sender's separate closing unit after both
-    // source and repair planes; marking the last symbol in either plane
-    // makes the receiver retire the object before the other plane arrives.
-    send(fixture.mediaGroup, lct(window.__fec.toi, 8, false,
-      packet, raptorqFti(recovered.length, 1200, maxSourceBlockLength, maxEncodingSymbols), 1));
-  }
-};
-sendRaptorQ(sourcePackets, window.__fec.droppedSource);
-sendRaptorQ(repairPackets);
-fecEncoder.free();
-log('after FEC rq=' + routeExports.route_get_raptorq_count());
-const recoveredResponse = await session.fetch(location.origin + '/mabr/' + fecLocation);
-if (recoveredResponse.status !== 200) throw new Error('recovered object status=' + recoveredResponse.status + ' log=' + JSON.stringify(window.__log) + ' fec=' + JSON.stringify(window.__fec) + ' rq=' + routeExports.route_get_raptorq_count());
-const recoveredBytes = new Uint8Array(await recoveredResponse.arrayBuffer());
-if (recoveredBytes.length !== recovered.length || recoveredBytes.some((value, index) => value !== recovered[index])) throw new Error('recovered object bytes mismatch');
-if (!window.__log.some((value) => value.startsWith('RaptorQ recovered ' + fecLocation + ' '))) throw new Error('RaptorQ recovery callback missing');
-log('RaptorQ media fetch verified');
+// The HLS segment is outside the derived pass's /dash/ scope.
+if (!derived) {
+  // Build a real RFC 6330 codeword for the HLS CMAF segment, drop one source
+  // symbol, and feed the repair symbols through route.wasm's encoding-6 queue.
+  // The FDT still advertises the original transfer length/location, so only the
+  // browser sidecar can make this player request succeed.
+  const fecLocation = 'hls/hls11.m4s';
+  const recovered = Uint8Array.from(atob(assets[fecLocation]), (value) => value.charCodeAt(0));
+  const fecEncoder = new rqModule.RaptorQEncoder(recovered, 1200, 4, 1, 1, 8);
+  const sourcePackets = fecEncoder.get_source_packets(0);
+  const repairPackets = fecEncoder.get_repair_packets(0, 0, 4);
+  const fecPacketSize = fecEncoder.packet_size();
+  const maxSourceBlockLength = sourcePackets.length / fecPacketSize;
+  const maxEncodingSymbols = maxSourceBlockLength + repairPackets.length / fecPacketSize;
+  const fecToi = Object.keys(assets).indexOf(fecLocation) + 1;
+  window.__fec = { location: fecLocation, toi: fecToi, transferLength: recovered.length, sourceSymbols: maxSourceBlockLength, droppedSource: 1, repairSymbols: repairPackets.length / fecPacketSize };
+  const sendRaptorQ = (blob, skipSourceIndex = -1) => {
+    for (let offset = 0, index = 0; offset < blob.length; offset += fecPacketSize, index++) {
+      if (index === skipSourceIndex) continue;
+      const localPacket = blob.slice(offset, offset + fecPacketSize);
+      // ROUTE/RFC 6330 encoding 6 carries [SBN:8|ESI:24].
+      const packet = localPacket;
+      // RaptorQ symbols are one object-wide repair plane. The close-object
+      // marker is sent by the ROUTE sender's separate closing unit after both
+      // source and repair planes; marking the last symbol in either plane
+      // makes the receiver retire the object before the other plane arrives.
+      send(fixture.mediaGroup, lct(window.__fec.toi, 8, false,
+        packet, raptorqFti(recovered.length, 1200, maxSourceBlockLength, maxEncodingSymbols), 1));
+    }
+  };
+  sendRaptorQ(sourcePackets, window.__fec.droppedSource);
+  sendRaptorQ(repairPackets);
+  fecEncoder.free();
+  log('after FEC rq=' + routeExports.route_get_raptorq_count());
+  const recoveredResponse = await session.fetch(location.origin + '/mabr/' + fecLocation);
+  if (recoveredResponse.status !== 200) throw new Error('recovered object status=' + recoveredResponse.status + ' log=' + JSON.stringify(window.__log) + ' fec=' + JSON.stringify(window.__fec) + ' rq=' + routeExports.route_get_raptorq_count());
+  const recoveredBytes = new Uint8Array(await recoveredResponse.arrayBuffer());
+  if (recoveredBytes.length !== recovered.length || recoveredBytes.some((value, index) => value !== recovered[index])) throw new Error('recovered object bytes mismatch');
+  if (!window.__log.some((value) => value.startsWith('RaptorQ recovered ' + fecLocation + ' '))) throw new Error('RaptorQ recovery callback missing');
+  log('RaptorQ media fetch verified');
+}
 
 const shakaScript = document.createElement('script');
 shakaScript.text = window.__shaka;
@@ -276,8 +286,12 @@ async function play(url, label) {
   if (video.readyState < 2 || video.buffered.length < 1) throw new Error(label + ' did not decode buffered media');
   await player.unload();
 }
-await play(location.origin + '/mabr/dash/dash.mpd', 'DASH');
-await play(location.origin + '/mabr/hls/media.m3u8', 'HLS');
+if (derived) {
+  await play(session.manifestUrl, 'DASH derived');
+} else {
+  await play(location.origin + '/mabr/dash/dash.mpd', 'DASH');
+  await play(location.origin + '/mabr/hls/media.m3u8', 'HLS');
+}
 window.__done = true;
 </script>`;
 
@@ -295,7 +309,7 @@ const server = http.createServer((request, response) => {
     response.end('<a href="7">7</a>');
   } else if (path === '/slt/7') {
     response.writeHead(200, { 'content-type': 'application/xml' });
-    response.end('<SLT><Server serviceId="42" globalServiceID="nasa-iss-a"><BroadcastSvcSignaling slsProtocol="1" slsDestinationIpAddress="239.21.4.1" slsDestinationUdpPort="5004" slsSourceIpAddress="192.0.2.10" /></Server></SLT>');
+    response.end(slsFixture.slt);
   } else if (path === '/route.wasm') {
     response.writeHead(200, { 'content-type': 'application/wasm' });
     response.end(routeWasm);
@@ -334,8 +348,7 @@ const browser = await chromium.launch({
   ...(chromePath ? { executablePath: chromePath } : {}),
 });
 try {
-  for (const shakaVariant of shakaVariants) {
-    for (const ingress of ['native', 'amt']) {
+  const openPage = async (query) => {
     const pageHandle = await browser.newPage();
     const errors = [];
     pageHandle.on('pageerror', (error) => errors.push(error.stack || String(error)));
@@ -344,7 +357,7 @@ try {
       if (message.type() === 'error') errors.push(message.text());
     });
     try {
-      await pageHandle.goto(`http://127.0.0.1:${port}/?ingress=${ingress}&shaka=${shakaVariant.name}`);
+      await pageHandle.goto(`http://127.0.0.1:${port}/?${query}`);
       for (let attempt = 0; attempt < 120; attempt++) {
         if ((await pageHandle.evaluate(() => window.__done === true))) break;
         await new Promise((resolveWait) => setTimeout(resolveWait, 500));
@@ -357,6 +370,14 @@ try {
       }));
       assert.equal(errors.length, 0, errors.join(' | '));
       assert.equal(state.done, true, JSON.stringify(state));
+      return state;
+    } finally {
+      await pageHandle.close();
+    }
+  };
+  for (const shakaVariant of shakaVariants) {
+    for (const ingress of ['native', 'amt']) {
+      const state = await openPage(`ingress=${ingress}&shaka=${shakaVariant.name}`);
       assert.equal(state.fec.location, 'hls/hls11.m4s');
       assert.equal(state.fec.droppedSource, 1);
       const expectedGatewayConfigs = ingress === 'native'
@@ -370,16 +391,18 @@ try {
         ];
       assert.deepEqual(state.gatewayConfigs, expectedGatewayConfigs);
       console.log(`${shakaVariant.name}/${ingress}: ${state.log.join('; ')}`);
-    } finally {
-      await pageHandle.close();
-    }
     }
   }
+  const derivedFrom = requests.length;
+  const derivedState = await openPage(`ingress=native&shaka=${shakaVariants[0].name}&mode=derived`);
+  console.log(`${shakaVariants[0].name}/native/derived: ${derivedState.log.join('; ')}`);
+  const derivedMedia = requests.slice(derivedFrom).filter((path) => path.startsWith('/dash/'));
+  assert.deepEqual(derivedMedia, [], `derived DS URLs escaped to HTTP: ${derivedMedia.join(', ')}`);
   assert.ok(requests.includes('/slt/'), 'HTTP LLS group discovery was not requested');
   assert.ok(requests.includes('/slt/7'), 'HTTP SLT document was not requested');
   const mediaRequests = requests.filter((path) => path.startsWith('/mabr/'));
   assert.deepEqual(mediaRequests, [], `cached media escaped to HTTP: ${mediaRequests.join(', ')}`);
-  console.log('PASS: real route.wasm + RaptorQ loss recovery reached Shaka DASH/HLS; native and AMT gateway contracts passed (network ingress simulated)');
+  console.log('PASS: real route.wasm + RaptorQ loss recovery reached Shaka DASH/HLS; native and AMT gateway contracts passed; derived DS URLs played DASH from the ROUTE cache (network ingress simulated)');
 } finally {
   await browser.close();
   await new Promise((resolveServer) => server.close(resolveServer));

@@ -28,6 +28,7 @@ type fixtureFile struct {
 
 type fixture struct {
 	Body             string   `json:"body"`
+	SLT              string   `json:"slt"`
 	ManifestLocation []string `json:"manifestLocations"`
 	SLSGroup         string   `json:"slsGroup"`
 	SLSPort          uint     `json:"slsPort"`
@@ -150,8 +151,33 @@ func main() {
 		panic(fmt.Errorf("generate SLS bundle: %w", err))
 	}
 
+	// The DS /slt/<group> document, encoded as the sender's generateSltXML
+	// does, with the TO-selected manifest path the derived e2e pass loads.
+	var slt bytes.Buffer
+	sltEncoder := xml.NewEncoder(&slt)
+	sltEncoder.Indent("", "\t")
+	if err := sltEncoder.Encode(&models.SltType{
+		Bsid: models.ListOfUnsignedShortType{7},
+		Service: []models.ServiceType{{
+			ServiceId:       42,
+			GlobalServiceID: "nasa-iss-a",
+			SltSvcSeqNum:    1,
+			ServiceCategory: 1,
+			BroadcastSvcSignaling: models.BroadcastSigType{
+				SlsProtocol:             1,
+				SlsDestinationIpAddress: models.IPv4addressType(slsGroup),
+				SlsDestinationUdpPort:   slsPort,
+				SlsSourceIpAddress:      models.IPv4addressType(slsSource),
+			},
+			PresentationManifest: []models.PresentationManifestType{{Value: "/dash/dash.mpd", ManifestID: "dash"}},
+		}},
+	}); err != nil {
+		panic(fmt.Errorf("generate SLT: %w", err))
+	}
+
 	if err := json.NewEncoder(os.Stdout).Encode(fixture{
 		Body:             base64.StdEncoding.EncodeToString(body),
+		SLT:              slt.String(),
 		ManifestLocation: []string{"dash/dash.mpd", "hls/media.m3u8"},
 		SLSGroup:         slsGroup,
 		SLSPort:          slsPort,
