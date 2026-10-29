@@ -91,8 +91,23 @@ const proxy = createRouteMabrSession({
 ```
 
 The proxy patches only `fetch`, returns a normal `Response`, and falls through
-to the network on a cache miss. Call `stop()` and `restoreFetch()` when playback
-ends.
+to the network on a cache miss. Use `cacheStats` or `onCacheEvent` to make that
+fallback visible to telemetry; the callback is best-effort and never changes
+playback behavior:
+
+```ts
+const proxy = createRouteMabrSession({
+  gateway: window.multicast,
+  wasm: routeWasm,
+  baseUrl,
+  onCacheEvent: ({ outcome, transport, url }) => {
+    metrics.count(`mabr.route.${outcome}`, 1, { transport, url });
+  },
+});
+// proxy.cacheStats === { hits: 0, misses: 0 } before any player request.
+```
+
+Call `stop()` and `restoreFetch()` when playback ends.
 
 The session uses the existing route.wasm completed-object ABI and its SLS
 manifest accessors (`route_sls_manifest*`, with `route_get_mpd*` as a legacy

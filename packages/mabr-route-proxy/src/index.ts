@@ -5,6 +5,8 @@ export type {
   RouteFile,
   RouteManifest,
   RoutePayload,
+  RouteCacheEvent,
+  RouteCacheStats,
   RouteSegment,
 } from './proxy.ts';
 
