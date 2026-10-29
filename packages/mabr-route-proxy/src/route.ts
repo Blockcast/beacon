@@ -193,7 +193,7 @@ export interface RouteMabrOptions {
   /** Cache scope: only URLs under this URL's directory are cached; never an origin root. Defaults to `baseUrl`. */
   scope?: string;
   maxEntries?: number;
-  /** Called when a player request is served by ROUTE or the HTTP fallback. */
+  /** Called when a GET/HEAD is served by ROUTE or the HTTP fallback; no-store and reload requests bypass the cache unreported. */
   onCacheEvent?: (event: RouteCacheEvent) => void;
   onObject?: (object: RouteObject) => void;
   /** Optional browser-side RFC 6330 recovery for the parser's symbol queue. */
