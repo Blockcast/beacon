@@ -183,6 +183,7 @@ test('resolves against baseUrl, caches only under scope and drops entries on res
     assert.deepEqual([...new Uint8Array(await (await proxy.fetch('https://ds.test/live/seg-1.m4s')).arrayBuffer())], [1]);
     assert.equal(await (await proxy.fetch('https://ds.test/live/seg-1.m4s', { cache: 'no-store' })).text(), 'network');
     assert.equal(await (await proxy.fetch('https://ds.test/live/seg-1.m4s', { cache: 'reload' })).text(), 'network');
+    assert.deepEqual(proxy.stats, { hits: 1, misses: 0 });
     proxy[rescope]('https://ds.test/', 'https://ds.test/vod/');
     assert.equal(proxy.size, 0);
   } finally {
