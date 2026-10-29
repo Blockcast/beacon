@@ -33,6 +33,19 @@ export interface RouteSegment {
   contentType?: string;
 }
 
+/** A player request served by ROUTE or sent to the normal HTTP origin. */
+export interface RouteCacheEvent {
+  url: string;
+  method: 'GET' | 'HEAD';
+  outcome: 'hit' | 'miss';
+  transport: 'route' | 'network';
+}
+
+export interface RouteCacheStats {
+  hits: number;
+  misses: number;
+}
+
 /** The bytes-only subset of the frozen `window.multicast` Subscription surface. */
 export interface ByteSubscription {
   addEventListener(type: 'bytes', listener: (event: CustomEvent<ArrayBuffer>) => void): void;
@@ -47,6 +60,8 @@ export interface MabrRouteProxyOptions {
    * this base's directory are cached, so nothing else can be shadowed.
    */
   baseUrl?: string;
+  /** Called for GET/HEAD requests; callback errors are ignored. */
+  onCacheEvent?: (event: RouteCacheEvent) => void;
 }
 
 function bytes(data: ArrayBuffer | ArrayBufferView): ArrayBuffer {
@@ -81,6 +96,9 @@ export class MabrRouteProxy {
   readonly #baseUrl: string;
   readonly #scope: string;
   readonly #entries = new Map<string, { body: ArrayBuffer; type: string }>();
+  readonly #onCacheEvent: ((event: RouteCacheEvent) => void) | undefined;
+  #hits = 0;
+  #misses = 0;
   #networkFetch: typeof globalThis.fetch = globalThis.fetch.bind(globalThis);
   #restore: (() => void) | undefined;
 
@@ -89,6 +107,7 @@ export class MabrRouteProxy {
     if (!Number.isInteger(this.#maxEntries) || this.#maxEntries < 1) throw new RangeError('maxEntries must be positive');
     this.#baseUrl = options.baseUrl ?? globalThis.location?.href ?? 'http://localhost/';
     this.#scope = new URL('.', this.#baseUrl).href;
+    this.#onCacheEvent = options.onCacheEvent;
   }
 
   /**
@@ -129,6 +148,15 @@ export class MabrRouteProxy {
   delete(url: string): boolean { return this.#entries.delete(new URL(url, this.#baseUrl).href); }
   clear(): void { this.#entries.clear(); }
   get size(): number { return this.#entries.size; }
+  get stats(): RouteCacheStats { return { hits: this.#hits, misses: this.#misses }; }
+
+  #report(event: RouteCacheEvent): void {
+    try {
+      this.#onCacheEvent?.(event);
+    } catch {
+      // Observability must never interrupt player requests.
+    }
+  }
 
   /** Connect a `window.multicast` bytes subscription with a ROUTE decoder. */
   attach(subscription: ByteSubscription, decode: (bytes: ArrayBuffer) => RouteSegment | readonly RouteSegment[] | undefined): () => void {
@@ -144,8 +172,15 @@ export class MabrRouteProxy {
   async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     const request = new Request(input, init);
     if (request.method !== 'GET' && request.method !== 'HEAD') return this.#networkFetch(request);
-    const hit = this.#entries.get(new URL(request.url, this.#baseUrl).href);
-    if (!hit) return this.#networkFetch(request);
+    const url = new URL(request.url, this.#baseUrl).href;
+    const hit = this.#entries.get(url);
+    if (!hit) {
+      this.#misses++;
+      this.#report({ url, method: request.method, outcome: 'miss', transport: 'network' });
+      return this.#networkFetch(request);
+    }
+    this.#hits++;
+    this.#report({ url, method: request.method, outcome: 'hit', transport: 'route' });
     const headers = new Headers({
       'content-type': hit.type,
       'cache-control': 'no-store',

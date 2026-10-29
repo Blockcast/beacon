@@ -1,4 +1,9 @@
-import { MabrRouteProxy, type ByteSubscription } from './proxy.ts';
+import {
+  MabrRouteProxy,
+  type ByteSubscription,
+  type RouteCacheEvent,
+  type RouteCacheStats,
+} from './proxy.ts';
 
 export interface RouteWasmExports {
   memory: WebAssembly.Memory;
@@ -183,6 +188,8 @@ export interface RouteMabrOptions {
   /** Mount point and cache scope for ROUTE Content-Location URLs: a path of its own, never the origin root. */
   baseUrl?: string;
   maxEntries?: number;
+  /** Called when a player request is served by ROUTE or the HTTP fallback. */
+  onCacheEvent?: (event: RouteCacheEvent) => void;
   onObject?: (object: RouteObject) => void;
   /** Optional browser-side RFC 6330 recovery for the parser's symbol queue. */
   raptorq?: RouteRaptorQOptions;
@@ -808,6 +815,7 @@ export class RouteMabrSession {
   }
 
   get size(): number { return this.#proxy.size; }
+  get cacheStats(): RouteCacheStats { return this.#proxy.stats; }
   installFetch(): () => void { return this.#proxy.installFetch(); }
   async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> { return this.#proxy.fetch(input, init); }
 

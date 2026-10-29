@@ -33,6 +33,47 @@ test('serves cached CMAF bytes and falls through misses', async () => {
   assert.equal(proxy.size, 1);
 });
 
+test('reports ROUTE hits and unicast fallback misses', async () => {
+  const originalFetch = globalThis.fetch;
+  const events: unknown[] = [];
+  globalThis.fetch = (async () => new Response('origin')) as typeof fetch;
+  try {
+    const proxy = new MabrRouteProxy({
+      baseUrl: 'https://player.test/live/',
+      onCacheEvent: (event) => {
+        events.push(event);
+        if (events.length === 1) throw new Error('metrics sink is down');
+      },
+    });
+    proxy.put({ url: 'seg.m4s', data: Uint8Array.of(1, 2) });
+    assert.equal(await (await proxy.fetch('https://player.test/live/seg.m4s')).status, 200);
+    assert.equal(await (await proxy.fetch('https://player.test/live/missing.m4s')).text(), 'origin');
+    assert.deepEqual(proxy.stats, { hits: 1, misses: 1 });
+    assert.deepEqual(events, [
+      { url: 'https://player.test/live/seg.m4s', method: 'GET', outcome: 'hit', transport: 'route' },
+      { url: 'https://player.test/live/missing.m4s', method: 'GET', outcome: 'miss', transport: 'network' },
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('reports HEAD and range hits without treating them as misses', async () => {
+  const events: unknown[] = [];
+  const proxy = new MabrRouteProxy({
+    baseUrl: 'https://player.test/live/',
+    onCacheEvent: (event) => events.push(event),
+  });
+  proxy.put({ url: 'seg.m4s', data: Uint8Array.of(1, 2, 3) });
+  assert.equal((await proxy.fetch('https://player.test/live/seg.m4s', { method: 'HEAD' })).status, 200);
+  assert.equal((await proxy.fetch('https://player.test/live/seg.m4s', { headers: { range: 'bytes=1-2' } })).status, 206);
+  assert.deepEqual(proxy.stats, { hits: 2, misses: 0 });
+  assert.deepEqual(events, [
+    { url: 'https://player.test/live/seg.m4s', method: 'HEAD', outcome: 'hit', transport: 'route' },
+    { url: 'https://player.test/live/seg.m4s', method: 'GET', outcome: 'hit', transport: 'route' },
+  ]);
+});
+
 test('evicts oldest entries', () => {
   const proxy = new MabrRouteProxy({ maxEntries: 1, baseUrl: 'https://player.test/' });
   proxy.put({ url: 'a.m4s', data: Uint8Array.of(1) });
