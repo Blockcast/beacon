@@ -47,11 +47,15 @@ const files = new Map([
   ['dash/dash.mpd', join(assetsRoot, 'dash-vr/dash.mpd')],
   ['dash/init.mp4', join(assetsRoot, 'dash-vr/init.mp4')],
   ...Array.from({ length: 6 }, (_, index) => [`dash/segment_${index}.m4s`, join(assetsRoot, `dash-vr/segment_${index}.m4s`)]),
+  // Keep the master in the same DS-root scope as the media playlist so the
+  // browser test exercises Shaka's normal master -> variant resolution.
+  ['hls/master.m3u8', undefined],
   ['hls/media.m3u8', join(assetsRoot, 'hls-mp4-muxed-aac-h264/hls.m3u8')],
   ['hls/init.mp4', join(assetsRoot, 'hls-mp4-muxed-aac-h264/init.mp4')],
   ['hls/hls11.m4s', join(assetsRoot, 'hls-mp4-muxed-aac-h264/hls11.m4s')],
 ]);
-const dataByLocation = new Map([...files].map(([location, path]) => [location, readFileSync(path)]));
+const hlsMaster = Buffer.from('#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-STREAM-INF:BANDWIDTH=1000000\nmedia.m3u8\n');
+const dataByLocation = new Map([...files].map(([location, path]) => [location, path ? readFileSync(path) : hlsMaster]));
 const encoded = Object.fromEntries([...dataByLocation].map(([location, data]) => [location, data.toString('base64')]));
 const fixtureEnv = {
   ...process.env,
@@ -290,7 +294,7 @@ if (derived) {
   await play(session.manifestUrl, 'DASH derived');
 } else {
   await play(location.origin + '/mabr/dash/dash.mpd', 'DASH');
-  await play(location.origin + '/mabr/hls/media.m3u8', 'HLS');
+  await play(location.origin + '/mabr/hls/master.m3u8', 'HLS master');
 }
 window.__done = true;
 </script>`;

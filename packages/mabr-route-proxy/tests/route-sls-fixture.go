@@ -24,6 +24,7 @@ type fixtureFile struct {
 	Location string
 	MIME     string
 	Path     string
+	Body     []byte
 }
 
 type fixture struct {
@@ -73,15 +74,20 @@ func main() {
 		{Location: "dash/segment_3.m4s", MIME: "video/iso.segment", Path: filepath.Join(*assetsRoot, "dash-vr", "segment_3.m4s")},
 		{Location: "dash/segment_4.m4s", MIME: "video/iso.segment", Path: filepath.Join(*assetsRoot, "dash-vr", "segment_4.m4s")},
 		{Location: "dash/segment_5.m4s", MIME: "video/iso.segment", Path: filepath.Join(*assetsRoot, "dash-vr", "segment_5.m4s")},
+		{Location: "hls/master.m3u8", MIME: "application/vnd.apple.mpegurl", Body: []byte("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-STREAM-INF:BANDWIDTH=1000000\nmedia.m3u8\n")},
 		{Location: "hls/media.m3u8", MIME: "application/vnd.apple.mpegurl", Path: filepath.Join(*assetsRoot, "hls-mp4-muxed-aac-h264", "hls.m3u8")},
 		{Location: "hls/init.mp4", MIME: "video/mp4", Path: filepath.Join(*assetsRoot, "hls-mp4-muxed-aac-h264", "init.mp4")},
 		{Location: "hls/hls11.m4s", MIME: "video/iso.segment", Path: filepath.Join(*assetsRoot, "hls-mp4-muxed-aac-h264", "hls11.m4s")},
 	}
 	bodies := make(map[string][]byte, len(files))
 	for _, file := range files {
-		body, err := os.ReadFile(file.Path)
-		if err != nil {
-			panic(fmt.Errorf("read %s: %w", file.Path, err))
+		body := file.Body
+		if body == nil {
+			var err error
+			body, err = os.ReadFile(file.Path)
+			if err != nil {
+				panic(fmt.Errorf("read %s: %w", file.Path, err))
+			}
 		}
 		bodies[file.Location] = body
 	}
@@ -140,6 +146,7 @@ func main() {
 	}
 	manifests := []*route.Manifest{
 		{MIME: "application/dash+xml", URL: "dash/dash.mpd", Data: parsedMPD},
+		{MIME: "application/vnd.apple.mpegurl", URL: "hls/master.m3u8", Data: common.Manifest{XML: rawManifest(hlsSLSBody(bodies["hls/master.m3u8"]))}},
 		{MIME: "application/vnd.apple.mpegurl", URL: "hls/media.m3u8", Data: common.Manifest{XML: rawManifest(hlsSLSBody(bodies["hls/media.m3u8"]))}},
 	}
 	sender, err := route.NewSLSPackageSender(1<<20, 1<<20, 1, 1<<20, nil, false, 0, nil)
@@ -178,7 +185,7 @@ func main() {
 	if err := json.NewEncoder(os.Stdout).Encode(fixture{
 		Body:             base64.StdEncoding.EncodeToString(body),
 		SLT:              slt.String(),
-		ManifestLocation: []string{"dash/dash.mpd", "hls/media.m3u8"},
+		ManifestLocation: []string{"dash/dash.mpd", "hls/master.m3u8", "hls/media.m3u8"},
 		SLSGroup:         slsGroup,
 		SLSPort:          slsPort,
 		SLSSource:        slsSource,
