@@ -384,7 +384,7 @@ test('discovers an HLS manifest from a DS authority without a fixed SLT group', 
 test('accepts a TO XMLID when SLT qualifies globalServiceID', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async () => new Response(
-    '<SLT><Service serviceId="20" globalServiceID="cdn.nasa-iss-a.public-st.cdn.blockcast.net"><SvcInetUrl>/nasa/iss/a/master.m3u8</SvcInetUrl><BroadcastSvcSignaling slsProtocol="1" slsDestinationIpAddress="232.254.0.28" slsDestinationUdpPort="1025" slsSourceIpAddress="69.25.95.198"/></Service></SLT>',
+    '<SLT><Service serviceId="20" globalServiceID="cdn.nasa-iss-a.public-st.cdn.blockcast.net"><PresentationManifest xmlns="urn:blockcast:route:1" manifestId="m1">/nasa/iss/a/master.m3u8</PresentationManifest><BroadcastSvcSignaling slsProtocol="1" slsDestinationIpAddress="232.254.0.28" slsDestinationUdpPort="1025" slsSourceIpAddress="69.25.95.198"/></Service></SLT>',
   )) as typeof fetch;
   try {
     assert.deepEqual(await discoverSlsEndpoint({
