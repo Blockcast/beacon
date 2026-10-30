@@ -25,8 +25,15 @@ That pulls `@blockcast/multicast-contract` with it. Install the contract alone
 if you are implementing a provider, or running the conformance suite against
 one, rather than consuming a gateway.
 
-The optional DASH/HLS mABR handoff, `@blockcast/mabr-route-proxy`, is not on
-npm yet. Build it from [`packages/mabr-route-proxy`](packages/mabr-route-proxy).
+The optional DASH/HLS mABR handoff is available as
+`@blockcast/mabr-route-proxy`:
+
+```sh
+npm install @blockcast/mabr-route-proxy
+```
+
+Its source and browser integration notes are in
+[`packages/mabr-route-proxy`](packages/mabr-route-proxy).
 
 ## Quickstart
 
