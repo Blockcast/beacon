@@ -218,6 +218,16 @@ function normalizeRouteSource(value?: string): string | undefined {
   return source;
 }
 
+function serviceMatches(selector: string | number, numericId: string, globalId: string): boolean {
+  const wanted = String(selector).trim();
+  if (wanted === numericId || wanted === globalId) return true;
+  if (!wanted || !globalId) return false;
+  // TO commonly supplies the DS XMLID while SLT carries the qualified
+  // globalServiceID. Match only a complete DNS label; never use a substring.
+  const host = globalId.split('/')[0]!.split(':')[0]!;
+  return host.split('.').some((label) => label.localeCompare(wanted, undefined, { sensitivity: 'accent' }) === 0);
+}
+
 function advertisedManifestUrl(body: string, authority: URL): string | undefined {
   const candidates: string[] = [];
   const pattern = /<((?:[A-Za-z_][\w.-]*:)?PresentationManifest)\b([^>]*?)(?:\/>|>([\s\S]*?)<\/\1\s*>)/gi;
@@ -252,7 +262,7 @@ function parseSltEndpoints(xml: string, serviceId?: string | number, authority?:
     const body = serviceMatch[3]!;
     const numericId = xmlUnescape(xmlAttribute(serviceTag, 'serviceId'));
     const globalId = xmlUnescape(xmlAttribute(serviceTag, 'globalServiceID'));
-    if (serviceId !== undefined && String(serviceId) !== numericId && String(serviceId) !== globalId) continue;
+    if (serviceId !== undefined && !serviceMatches(serviceId, numericId, globalId)) continue;
     const signal = [...body.matchAll(/<((?:[A-Za-z_][\w.-]*:)?BroadcastSvcSignaling)\b([^>]*?)(?:\/?>)/gi)]
       .find((match) => xmlAttribute(match[2]!, 'slsProtocol') === '1');
     if (!signal) continue;
