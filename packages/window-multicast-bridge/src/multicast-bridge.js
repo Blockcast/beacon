@@ -2220,6 +2220,13 @@ export function multicastBridgeTransportOptionsFromConfig(config = {}) {
   if (config.origin !== undefined) opts.origin = config.origin;
   if (config.standard !== undefined) opts.standard = config.standard;
   if (config.fec !== undefined) opts.fec = config.fec;
+  // Catalog atsc3 networkSource tuning (draft-ramadan-moq-multicast-01
+  // §4.2.2): `frequency` in kHz, optional `plpId`/`serviceId`. The bridge
+  // validates and tunes. Part of the sharing key, so subscribes to one group
+  // on different channels never share a receiver.
+  if (config.frequency !== undefined) opts.frequency = config.frequency;
+  if (config.plpId !== undefined) opts.plpId = config.plpId;
+  if (config.serviceId !== undefined) opts.serviceId = config.serviceId;
   // The canonical origin discriminant owns acquisition. IP-multicast is
   // native-only, including the omitted-origin default. AMT is tunnel-only.
   if (config.origin === 'amt') {
@@ -5137,6 +5144,9 @@ export class BridgeClient {
     if (entry.transportOpts.origin) msg.origin = entry.transportOpts.origin;
     if (entry.transportOpts.standard) msg.standard = entry.transportOpts.standard;
     if (entry.transportOpts.fec !== undefined) msg.fec = entry.transportOpts.fec;
+    if (entry.transportOpts.frequency !== undefined) msg.frequency = entry.transportOpts.frequency;
+    if (entry.transportOpts.plpId !== undefined) msg.plp_id = entry.transportOpts.plpId;
+    if (entry.transportOpts.serviceId !== undefined) msg.service_id = entry.transportOpts.serviceId;
     if (entry.transportOpts.mode) msg.mode = entry.transportOpts.mode;
     if (entry.transportOpts.discovery) msg.discovery = entry.transportOpts.discovery;
     if (entry.transportOpts.amtRelay) msg.amt_relay = entry.transportOpts.amtRelay;

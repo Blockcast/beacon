@@ -1,6 +1,6 @@
 {
   "name": "@blockcast/window-multicast-bridge",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Browser ESM polyfill that discovers a local Blockcast bridge and installs window.multicast over WebTransport.",
   "type": "module",
   "main": "./dist/multicast-bridge.js",
