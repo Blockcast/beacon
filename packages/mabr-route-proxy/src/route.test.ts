@@ -216,6 +216,172 @@ test('keeps an explicit baseUrl and resolves the manifest under it', async () =>
   }
 });
 
+test('maps a DS-root-relative SLS manifest onto an explicit player base once', async () => {
+  let listener: ((event: CustomEvent<ArrayBuffer>) => void) | undefined;
+  const memory = new WebAssembly.Memory({ initial: 2 });
+  const encoder = new TextEncoder();
+  const body = '<MPD id="nasa"/>';
+  const location = 'nasa/iss/a/manifest.mpd';
+  const put = (offset: number, value: string): number => {
+    const bytes = encoder.encode(value);
+    new Uint8Array(memory.buffer, offset, bytes.length).set(bytes);
+    return offset;
+  };
+  const wasm = { exports: {
+    memory,
+    route_get_buffer: () => 0,
+    route_get_buffer_size: () => 128,
+    route_process_udp: () => {},
+    route_get_completed_count: () => 0,
+    route_sls_manifest_count: () => 1,
+    route_sls_manifest: () => put(512, body),
+    route_sls_manifest_len: () => body.length,
+    route_sls_manifest_location: () => put(1024, location),
+    route_sls_manifest_location_len: () => location.length,
+  } };
+  const gateway = {
+    async subscribe() {
+      return {
+        addEventListener(_type: 'bytes', callback: (event: CustomEvent<ArrayBuffer>) => void) { listener = callback; },
+        removeEventListener() { listener = undefined; },
+        async unsubscribe() {},
+      };
+    },
+  };
+  const session = createRouteMabrSession({
+    gateway,
+    wasm,
+    ingress: 'native',
+    group: '232.1.1.66',
+    port: 8000,
+    baseUrl: 'https://player.example/mabr/',
+  });
+  await session.start();
+  listener?.({ detail: Uint8Array.of(1).buffer } as CustomEvent<ArrayBuffer>);
+  assert.equal(session.manifestUrl, 'https://player.example/mabr/nasa/iss/a/manifest.mpd');
+  assert.equal(await (await session.fetch(session.manifestUrl!)).text(), body);
+  await session.stop();
+});
+
+test('waits for an SLS-derived manifest after start', async () => {
+  const gateway = bytesGateway();
+  const wasm = fakeWasm();
+  wasm.exports.route_get_completed_count = () => 0;
+  const encoder = new TextEncoder();
+  const body = '<MPD id="nasa"/>';
+  const location = 'nasa/iss/a/manifest.mpd';
+  const put = (offset: number, value: string): number => {
+    const bytes = encoder.encode(value);
+    new Uint8Array(wasm.exports.memory.buffer, offset, bytes.length).set(bytes);
+    return offset;
+  };
+  wasm.exports.route_sls_manifest_count = () => 1;
+  wasm.exports.route_sls_manifest = () => put(4096, body);
+  wasm.exports.route_sls_manifest_len = () => body.length;
+  wasm.exports.route_sls_manifest_location = () => put(8192, location);
+  wasm.exports.route_sls_manifest_location_len = () => location.length;
+  const session = createRouteMabrSession({
+    gateway,
+    wasm,
+    ingress: 'native',
+    group: '232.1.1.66',
+    port: 8000,
+    sltUrl: 'https://ds.example.test',
+    baseUrl: 'https://player.example/mabr/',
+  });
+  await session.start();
+  const manifest = session.waitForManifest(1000);
+  gateway.deliver();
+  assert.equal(await manifest, 'https://player.example/mabr/nasa/iss/a/manifest.mpd');
+  await session.stop();
+});
+
+test('tries the next SLS manifest when the preferred candidate cannot be scoped', async () => {
+  const gateway = bytesGateway();
+  const wasm = fakeWasm();
+  wasm.exports.route_get_completed_count = () => 0;
+  const encoder = new TextEncoder();
+  const manifests = [
+    { location: 'manifest.mpd', body: '<MPD id="root"/>' },
+    { location: 'nasa/iss/a/master.m3u8', body: '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nmedia.m3u8\n' },
+  ];
+  let index = 0;
+  const put = (offset: number, value: string): number => {
+    const bytes = encoder.encode(value);
+    new Uint8Array(wasm.exports.memory.buffer, offset, bytes.length).set(bytes);
+    return offset;
+  };
+  wasm.exports.route_sls_manifest_count = () => manifests.length;
+  wasm.exports.route_sls_manifest = (i: number) => { index = i; return put(4096, manifests[i]!.body); };
+  wasm.exports.route_sls_manifest_len = () => manifests[index]!.body.length;
+  wasm.exports.route_sls_manifest_location = (i: number) => { index = i; return put(8192, manifests[i]!.location); };
+  wasm.exports.route_sls_manifest_location_len = () => manifests[index]!.location.length;
+  const session = createRouteMabrSession({
+    gateway,
+    wasm,
+    ingress: 'native',
+    group: '232.1.1.66',
+    port: 8000,
+    sltUrl: 'https://ds.example.test',
+  });
+  await session.start();
+  const manifest = session.waitForManifest(1000);
+  gateway.deliver();
+  assert.equal(await manifest, 'https://ds.example.test/nasa/iss/a/master.m3u8');
+  await session.stop();
+});
+
+test('selects an HLS master over a media playlist when SLS omits PresentationManifest', async () => {
+  let listener: ((event: CustomEvent<ArrayBuffer>) => void) | undefined;
+  const memory = new WebAssembly.Memory({ initial: 2 });
+  const encoder = new TextEncoder();
+  const manifests = [
+    { location: 'nasa/iss/a/media_0.m3u8', body: '#EXTM3U\n#EXTINF:2,\nseg-1.m4s\n' },
+    { location: 'nasa/iss/a/master.m3u8', body: '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000\nmedia_0.m3u8\n' },
+  ];
+  let current = 0;
+  const put = (offset: number, value: string): number => {
+    const bytes = encoder.encode(value);
+    new Uint8Array(memory.buffer, offset, bytes.length).set(bytes);
+    return offset;
+  };
+  const wasm = { exports: {
+    memory,
+    route_get_buffer: () => 0,
+    route_get_buffer_size: () => 128,
+    route_process_udp: () => {},
+    route_get_completed_count: () => 0,
+    route_sls_manifest_count: () => manifests.length,
+    route_sls_manifest: (index: number) => { current = index; return put(512, manifests[index]!.body); },
+    route_sls_manifest_len: () => manifests[current]!.body.length,
+    route_sls_manifest_location: (index: number) => { current = index; return put(1024, manifests[index]!.location); },
+    route_sls_manifest_location_len: () => manifests[current]!.location.length,
+  } };
+  const gateway = {
+    async subscribe() {
+      return {
+        addEventListener(_type: 'bytes', callback: (event: CustomEvent<ArrayBuffer>) => void) { listener = callback; },
+        removeEventListener() { listener = undefined; },
+        async unsubscribe() {},
+      };
+    },
+  };
+  const session = createRouteMabrSession({
+    gateway,
+    wasm,
+    ingress: 'native',
+    group: '232.1.1.66',
+    port: 8000,
+    baseUrl: 'https://player.example/mabr/',
+  });
+  await session.start();
+  listener?.({ detail: Uint8Array.of(1).buffer } as CustomEvent<ArrayBuffer>);
+  assert.equal(session.manifestUrl, 'https://player.example/mabr/nasa/iss/a/master.m3u8');
+  assert.equal(await (await session.fetch(session.manifestUrl!)).text(), manifests[1]!.body);
+  assert.equal(await (await session.fetch('https://player.example/mabr/nasa/iss/a/media_0.m3u8')).text(), manifests[0]!.body);
+  await session.stop();
+});
+
 test('keeps the legacy default base when no manifest is known', async () => {
   const gateway = bytesGateway();
   const session = createRouteMabrSession({ gateway, wasm: fakeWasm(), group: '239.21.4.1', port: 5004 });
@@ -476,6 +642,50 @@ test('exposes every DASH and HLS manifest signalled by SLS', async () => {
   await session.stop();
 });
 
+test('learns the player manifest from SLS when SLT omits PresentationManifest', async () => {
+  const originalFetch = globalThis.fetch;
+  const gateway = bytesGateway();
+  const wasm = fakeWasm();
+  wasm.exports.route_get_completed_count = () => 0;
+  const encoder = new TextEncoder();
+  const location = 'nasa/iss/a/manifest.mpd';
+  const body = '<MPD id="nasa"/>';
+  const put = (offset: number, value: string): number => {
+    const bytes = encoder.encode(value);
+    new Uint8Array(wasm.exports.memory.buffer, offset, bytes.length).set(bytes);
+    return offset;
+  };
+  wasm.exports.route_sls_manifest_count = () => 1;
+  wasm.exports.route_sls_manifest = () => put(4096, body);
+  wasm.exports.route_sls_manifest_len = () => body.length;
+  wasm.exports.route_sls_manifest_location = () => put(8192, location);
+  wasm.exports.route_sls_manifest_location_len = () => location.length;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url === 'https://cdn.nasa-iss-a.public-st.cdn.blockcast.net/slt/') return new Response('<a href="7">7</a>');
+    if (url === 'https://cdn.nasa-iss-a.public-st.cdn.blockcast.net/slt/7') {
+      return new Response('<SLT><Service globalServiceID="nasa-iss-a"><BroadcastSvcSignaling slsProtocol="1" slsDestinationIpAddress="232.254.0.28" slsDestinationUdpPort="1025" /></Service></SLT>');
+    }
+    return new Response('network');
+  }) as typeof fetch;
+  try {
+    const session = createRouteMabrSession({
+      gateway,
+      wasm,
+      ingress: 'native',
+      sltUrl: 'https://cdn.nasa-iss-a.public-st.cdn.blockcast.net',
+      serviceId: 'nasa-iss-a',
+    });
+    await session.start();
+    gateway.deliver();
+    assert.equal(session.manifestUrl, 'https://cdn.nasa-iss-a.public-st.cdn.blockcast.net/nasa/iss/a/manifest.mpd');
+    assert.equal(await (await session.fetch(session.manifestUrl!)).text(), body);
+    await session.stop();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('does not claim an unsupported ATSC 1 tuner-origin subscription', async () => {
   const session = createRouteMabrSession({
     gateway: { async subscribe() { throw new Error('subscribe must not be called'); } },
@@ -620,6 +830,22 @@ test('discovers a TO delivery path from the Blockcast SLT extension', async () =
       port: 8000,
       manifestUrl: 'https://ds.example.test/live/manifest.mpd',
     });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('ranks PresentationManifest advertisements instead of using SLT order', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(
+    '<SLT><Service globalServiceID="generic-service"><PresentationManifest xmlns="urn:blockcast:route:1">/live/master.m3u8</PresentationManifest><PresentationManifest xmlns="urn:blockcast:route:1">/live/manifest.mpd</PresentationManifest><BroadcastSvcSignaling slsProtocol="1" slsDestinationIpAddress="232.1.1.66" slsDestinationUdpPort="8000"/></Service></SLT>',
+  )) as typeof fetch;
+  try {
+    const endpoint = await discoverSlsEndpoint({
+      sltUrl: 'https://ds.example.test/slt/7',
+      serviceId: 'generic-service',
+    });
+    assert.equal(endpoint.manifestUrl, 'https://ds.example.test/live/manifest.mpd');
   } finally {
     globalThis.fetch = originalFetch;
   }

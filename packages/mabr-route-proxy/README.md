@@ -21,12 +21,16 @@ const session = createRouteMabrSession({
 });
 const restoreFetch = session.installFetch();
 await session.start();
-if (!session.manifestUrl) throw new Error('DS SLT did not advertise a DASH/HLS manifest');
-await shakaPlayer.load(session.manifestUrl); // DASH MPD or HLS .m3u8
+const manifestUrl = await session.waitForManifest(); // also waits for SLS-only manifests
+await shakaPlayer.load(manifestUrl); // DASH MPD or HLS .m3u8
 ```
 
 `start()` reads the DS's `/slt/`, joins the service's SLS leg and takes the
-manifest from the service's `PresentationManifest`. The sender labels ROUTE
+manifest from the service's `PresentationManifest` when present. If the SLT
+omits it, the first DASH/HLS manifest retained from the multicast SLS bundle
+becomes `session.manifestUrl` after the first SLS bytes arrive. Use
+`waitForManifest()` when the SLT may omit it; its relative path is resolved
+against the DS authority from `sltUrl`. The sender labels ROUTE
 objects with DS-root paths (`live/seg-1.m4s`), so the session resolves
 Content-Locations against the DS origin root and caches only URLs under the
 manifest's directory (`https://live.example/live/`). `session.manifestUrl` is
@@ -45,9 +49,12 @@ service SLS over HTTP. `sltUrl` may be the public delivery-service origin or
 an explicit `/slt/<group>` URL. For an origin, the library reads the public
 `/slt/` listing and fetches the advertised groups; it never assumes a group
 number. The selected service's `PresentationManifest`
-(`urn:blockcast:route:1`) supplies the DASH or HLS manifest path, which must
-be on the DS's own origin; when it advertises several (for example DASH and
-HLS), the first in SLT order is used. Its SLS leg supplies the first multicast
+(`urn:blockcast:route:1`) supplies the DASH or HLS manifest path when the DS
+advertises one; when it advertises several (for example DASH and HLS), the
+highest-ranked presentation is used (canonical DASH MPD, other MPD, then HLS;
+ties retain SLT order). Otherwise the first DASH/HLS part in the SLS
+bundle supplies it. Any inferred manifest must remain on the DS's own origin.
+Its SLS leg supplies the first multicast
 join. Its hostname is never used as the AMT relay. The browser still receives
 ROUTE bytes through DIMT or AMT, and the S-TSID on that leg supplies the
 rendition `(S,G,port)` values. Discovery requests are sent with
