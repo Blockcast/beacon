@@ -9,8 +9,10 @@
 //   npm run test:e2e
 //
 // It feeds the real parser through the same bytes subscription used by
-// window.multicast, drops one RaptorQ source symbol from the HLS CMAF segment,
-// and verifies that recovered media plus ordinary ROUTE DASH objects are
+// window.multicast, drops one source packet from the HLS CMAF segment on the
+// byte-offset source flow, sends the staging sender's RaptorQ repair plane on
+// its own S-TSID RepairFlow group, and verifies that recovered media plus
+// ordinary ROUTE DASH objects are
 // consumed by Shaka. Network ingress is simulated; native and AMT joins
 // are checked as gateway configuration contracts.
 import assert from 'node:assert/strict';
@@ -107,6 +109,10 @@ const instantiated = await WebAssembly.instantiate(routeBytes, go.importObject);
 go.run(instantiated.instance);
 const routeExports = instantiated.instance.exports;
 routeExports.route_init();
+// Counts every encoding-6 symbol route.wasm queued; the session drains the
+// queue synchronously, so route_get_raptorq_count() alone reads 0 afterwards.
+let raptorqQueued = 0;
+const sessionExports = { ...routeExports, route_pop_raptorq_advance: () => { raptorqQueued++; routeExports.route_pop_raptorq_advance(); } };
 const subscriptions = [];
 const gateway = {
   subscribe: async (config) => {
@@ -121,7 +127,7 @@ const gateway = {
 };
 const sessionOptions = {
   gateway,
-  wasm: { exports: routeExports },
+  wasm: { exports: sessionExports },
   ingress,
   // HTTP LLS/SLT selects the service SLS leg. Rendition legs are learned from
   // S-TSID in the proxy's unit coverage; this browser test exercises the same
@@ -180,28 +186,14 @@ function compactFti(transferLength, symbolLength, maxSourceBlockLength = transfe
   return extension;
 }
 
-function raptorqFti(transferLength, symbolLength, maxSourceBlockLength, maxEncodingSymbols) {
-  const extension = new Uint8Array(28);
-  const view = new DataView(extension.buffer);
-  extension[0] = 64;
-  extension[1] = 7;
-  const high = Math.floor(transferLength / 0x1000000);
-  view.setUint16(2, high, false);
-  view.setUint32(4, (transferLength << 8) >>> 0, false);
-  view.setUint16(8, symbolLength, false);
-  view.setUint32(10, (1 << 24) | (1 << 8) | 8, false);
-  view.setUint16(14, 0, false);
-  view.setUint32(16, maxSourceBlockLength, false);
-  view.setUint32(20, maxEncodingSymbols, false);
-  return extension;
-}
-function sendObject(group, toi, codePoint, data) {
+function sendObject(group, toi, codePoint, data, { dropPacket = -1, close = true } = {}) {
   const packetSize = 1200;
-  for (let offset = 0; offset < data.length; offset += packetSize) {
+  for (let offset = 0, index = 0; offset < data.length; offset += packetSize, index++) {
+    if (index === dropPacket) continue;
     const part = data.subarray(offset, Math.min(offset + packetSize, data.length));
     const payloadId = new Uint8Array(4);
     new DataView(payloadId.buffer).setUint32(0, offset, false);
-    send(group, lct(toi, codePoint, offset + part.length === data.length, new Uint8Array([...payloadId, ...part]), offset === 0 ? compactFti(data.length, 1) : undefined, 1));
+    send(group, lct(toi, codePoint, close && offset + part.length === data.length, new Uint8Array([...payloadId, ...part]), offset === 0 ? compactFti(data.length, 1) : undefined, 1));
   }
 }
 
@@ -237,38 +229,42 @@ for (const [location, base64] of Object.entries(assets)) {
 
 // The HLS segment is outside the derived pass's /dash/ scope.
 if (!derived) {
-  // Build a real RFC 6330 codeword for the HLS CMAF segment, drop one source
-  // symbol, and feed the repair symbols through route.wasm's encoding-6 queue.
-  // The FDT still advertises the original transfer length/location, so only the
-  // browser sidecar can make this player request succeed.
+  // Mirror the deployed staging sender (route/sender.go): source on the
+  // byte-offset flow, and per source block of K symbols (the final block
+  // K'-native short) RFC 6330 repair on the RepairFlow group under the same
+  // TOI, with the 8-byte [SBN:32][0:8|ESI:24] payload ID, then a header-only
+  // close. One dropped 1200-byte source packet loses two T=1344 symbols of
+  // block 0, which only the repair plane can restore.
   const fecLocation = 'hls/hls11.m4s';
   const recovered = Uint8Array.from(atob(assets[fecLocation]), (value) => value.charCodeAt(0));
-  const fecEncoder = new rqModule.RaptorQEncoder(recovered, 1200, 4, 1, 1, 8);
-  const sourcePackets = fecEncoder.get_source_packets(0);
-  const repairPackets = fecEncoder.get_repair_packets(0, 0, 4);
-  const fecPacketSize = fecEncoder.packet_size();
-  const maxSourceBlockLength = sourcePackets.length / fecPacketSize;
-  const maxEncodingSymbols = maxSourceBlockLength + repairPackets.length / fecPacketSize;
   const fecToi = Object.keys(assets).indexOf(fecLocation) + 1;
-  window.__fec = { location: fecLocation, toi: fecToi, transferLength: recovered.length, sourceSymbols: maxSourceBlockLength, droppedSource: 1, repairSymbols: repairPackets.length / fecPacketSize };
-  const sendRaptorQ = (blob, skipSourceIndex = -1) => {
-    for (let offset = 0, index = 0; offset < blob.length; offset += fecPacketSize, index++) {
-      if (index === skipSourceIndex) continue;
-      const localPacket = blob.slice(offset, offset + fecPacketSize);
-      // ROUTE/RFC 6330 encoding 6 carries [SBN:8|ESI:24].
-      const packet = localPacket;
-      // RaptorQ symbols are one object-wide repair plane. The close-object
-      // marker is sent by the ROUTE sender's separate closing unit after both
-      // source and repair planes; marking the last symbol in either plane
-      // makes the receiver retire the object before the other plane arrives.
-      send(fixture.mediaGroup, lct(window.__fec.toi, 8, false,
-        packet, raptorqFti(recovered.length, 1200, maxSourceBlockLength, maxEncodingSymbols), 1));
+  const T = fixture.raptorqSymbolLength;
+  const blockBytes = T * fixture.raptorqSourceBlockLength;
+  const repairPerBlock = fixture.raptorqMaxNumEs - fixture.raptorqSourceBlockLength;
+  let repairSymbols = 0;
+  sendObject(fixture.mediaGroup, fecToi, 8, recovered, { dropPacket: 1, close: false });
+  for (let sbn = 0; sbn * blockBytes < recovered.length; sbn++) {
+    const block = recovered.subarray(sbn * blockBytes, Math.min((sbn + 1) * blockBytes, recovered.length));
+    const encoder = new rqModule.RaptorQEncoder(block, T, repairPerBlock, 1, 1, 8);
+    const repair = encoder.get_repair_packets(0, 0, repairPerBlock);
+    const packetSize = encoder.packet_size();
+    encoder.free();
+    for (let offset = 0; offset < repair.length; offset += packetSize) {
+      // fec-raptorq emits RFC 6330's 4-byte [SBN:8|ESI:24]; ROUTE encoding 6
+      // carries the 8-byte INVARIANTS §13.2 ID.
+      const esi = (repair[offset + 1] << 16) | (repair[offset + 2] << 8) | repair[offset + 3];
+      const wire = new Uint8Array(8 + T);
+      new DataView(wire.buffer).setUint32(0, sbn, false);
+      new DataView(wire.buffer).setUint32(4, esi, false);
+      wire.set(repair.subarray(offset + 4, offset + packetSize), 8);
+      send(fixture.repairGroup, lct(fecToi, 129, false, wire, undefined, 1));
+      repairSymbols++;
     }
-  };
-  sendRaptorQ(sourcePackets, window.__fec.droppedSource);
-  sendRaptorQ(repairPackets);
-  fecEncoder.free();
-  log('after FEC rq=' + routeExports.route_get_raptorq_count());
+  }
+  send(fixture.mediaGroup, lct(fecToi, 8, true, new Uint8Array(), undefined, 1));
+  window.__fec = { location: fecLocation, toi: fecToi, transferLength: recovered.length, sourceSymbols: Math.ceil(recovered.length / T), droppedSource: 1, repairSymbols, raptorqQueued };
+  if (raptorqQueued === 0) throw new Error('route.wasm queued no encoding-6 symbols fec=' + JSON.stringify(window.__fec));
+  log('after FEC rq=' + raptorqQueued);
   const recoveredResponse = await session.fetch(location.origin + '/mabr/' + fecLocation);
   if (recoveredResponse.status !== 200) throw new Error('recovered object status=' + recoveredResponse.status + ' log=' + JSON.stringify(window.__log) + ' fec=' + JSON.stringify(window.__fec) + ' rq=' + routeExports.route_get_raptorq_count());
   const recoveredBytes = new Uint8Array(await recoveredResponse.arrayBuffer());
@@ -384,14 +380,17 @@ try {
       const state = await openPage(`ingress=${ingress}&shaka=${shakaVariant.name}`);
       assert.equal(state.fec.location, 'hls/hls11.m4s');
       assert.equal(state.fec.droppedSource, 1);
+      assert.ok(state.fec.raptorqQueued > 0, `route.wasm queued no RaptorQ symbols: ${JSON.stringify(state.fec)}`);
       const expectedGatewayConfigs = ingress === 'native'
         ? [
           { group: slsFixture.slsGroup, port: slsFixture.slsPort, source: slsFixture.slsSource, consume: 'bytes', origin: 'ip-multicast' },
           { group: slsFixture.mediaGroup, port: slsFixture.mediaPort, source: slsFixture.mediaSource, consume: 'bytes', origin: 'ip-multicast' },
+          { group: slsFixture.repairGroup, port: slsFixture.mediaPort, source: slsFixture.mediaSource, consume: 'bytes', origin: 'ip-multicast' },
         ]
         : [
           { group: slsFixture.slsGroup, port: slsFixture.slsPort, source: slsFixture.slsSource, consume: 'bytes', origin: 'amt', discovery: 'driad' },
           { group: slsFixture.mediaGroup, port: slsFixture.mediaPort, source: slsFixture.mediaSource, consume: 'bytes', origin: 'amt', discovery: 'driad' },
+          { group: slsFixture.repairGroup, port: slsFixture.mediaPort, source: slsFixture.mediaSource, consume: 'bytes', origin: 'amt', discovery: 'driad' },
         ];
       assert.deepEqual(state.gatewayConfigs, expectedGatewayConfigs);
       console.log(`${shakaVariant.name}/${ingress}: ${state.log.join('; ')}`);
