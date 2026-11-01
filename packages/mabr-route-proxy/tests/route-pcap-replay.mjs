@@ -29,6 +29,10 @@ function lct(p) {
   const C = (p[0] >> 2) & 3, S = (p[1] >> 7) & 1, O = (p[1] >> 5) & 3, H = (p[1] >> 4) & 1;
   const hlen = p[2] * 4; let o = 4 + 4 * (C + 1);
   const tl = 4 * S + 2 * H, ol = 4 * O + 2 * H;
+  // Buffer.readUIntBE only accepts widths up to six bytes. A diagnostic
+  // capture with a wider LCT field is still useful; skip that packet instead
+  // of aborting the whole replay.
+  if (tl > 6 || ol > 6) return undefined;
   const tsi = p.readUIntBE(o, tl || 1) * (tl ? 1 : 0); o += tl;
   const toi = ol ? p.readUIntBE(o, ol) : 0;
   return { cp: p[3], tsi, toi, hlen, close: (p[1] & 1) === 1 };
@@ -61,7 +65,7 @@ await session.start();
 const truth = new Map(); const dropped = new Map(); const seen = new Map();
 let fed = 0, droppedPkts = 0;
 for (const { dst, payload } of packets(pcap)) {
-  const h = lct(payload); const pl = payload.subarray(h.hlen);
+  const h = lct(payload); if (!h) continue; const pl = payload.subarray(h.hlen);
   const srcMedia = dst === sourceGroup && h.cp === 8 && pl.length > 4;
   if (srcMedia) {
     const t = truth.get(h.toi) ?? truth.set(h.toi, new Map()).get(h.toi); t.set(pl.readUInt32BE(0), Buffer.from(pl.subarray(4)));
