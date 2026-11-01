@@ -263,6 +263,74 @@ test('maps a DS-root-relative SLS manifest onto an explicit player base once', a
   await session.stop();
 });
 
+test('waits for an SLS-derived manifest after start', async () => {
+  const gateway = bytesGateway();
+  const wasm = fakeWasm();
+  wasm.exports.route_get_completed_count = () => 0;
+  const encoder = new TextEncoder();
+  const body = '<MPD id="nasa"/>';
+  const location = 'nasa/iss/a/manifest.mpd';
+  const put = (offset: number, value: string): number => {
+    const bytes = encoder.encode(value);
+    new Uint8Array(wasm.exports.memory.buffer, offset, bytes.length).set(bytes);
+    return offset;
+  };
+  wasm.exports.route_sls_manifest_count = () => 1;
+  wasm.exports.route_sls_manifest = () => put(4096, body);
+  wasm.exports.route_sls_manifest_len = () => body.length;
+  wasm.exports.route_sls_manifest_location = () => put(8192, location);
+  wasm.exports.route_sls_manifest_location_len = () => location.length;
+  const session = createRouteMabrSession({
+    gateway,
+    wasm,
+    ingress: 'native',
+    group: '232.1.1.66',
+    port: 8000,
+    sltUrl: 'https://ds.example.test',
+    baseUrl: 'https://player.example/mabr/',
+  });
+  await session.start();
+  const manifest = session.waitForManifest(1000);
+  gateway.deliver();
+  assert.equal(await manifest, 'https://player.example/mabr/nasa/iss/a/manifest.mpd');
+  await session.stop();
+});
+
+test('tries the next SLS manifest when the preferred candidate cannot be scoped', async () => {
+  const gateway = bytesGateway();
+  const wasm = fakeWasm();
+  wasm.exports.route_get_completed_count = () => 0;
+  const encoder = new TextEncoder();
+  const manifests = [
+    { location: 'manifest.mpd', body: '<MPD id="root"/>' },
+    { location: 'nasa/iss/a/master.m3u8', body: '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nmedia.m3u8\n' },
+  ];
+  let index = 0;
+  const put = (offset: number, value: string): number => {
+    const bytes = encoder.encode(value);
+    new Uint8Array(wasm.exports.memory.buffer, offset, bytes.length).set(bytes);
+    return offset;
+  };
+  wasm.exports.route_sls_manifest_count = () => manifests.length;
+  wasm.exports.route_sls_manifest = (i: number) => { index = i; return put(4096, manifests[i]!.body); };
+  wasm.exports.route_sls_manifest_len = () => manifests[index]!.body.length;
+  wasm.exports.route_sls_manifest_location = (i: number) => { index = i; return put(8192, manifests[i]!.location); };
+  wasm.exports.route_sls_manifest_location_len = () => manifests[index]!.location.length;
+  const session = createRouteMabrSession({
+    gateway,
+    wasm,
+    ingress: 'native',
+    group: '232.1.1.66',
+    port: 8000,
+    sltUrl: 'https://ds.example.test',
+  });
+  await session.start();
+  const manifest = session.waitForManifest(1000);
+  gateway.deliver();
+  assert.equal(await manifest, 'https://ds.example.test/nasa/iss/a/master.m3u8');
+  await session.stop();
+});
+
 test('selects an HLS master over a media playlist when SLS omits PresentationManifest', async () => {
   let listener: ((event: CustomEvent<ArrayBuffer>) => void) | undefined;
   const memory = new WebAssembly.Memory({ initial: 2 });

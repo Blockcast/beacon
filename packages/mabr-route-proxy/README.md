@@ -21,15 +21,16 @@ const session = createRouteMabrSession({
 });
 const restoreFetch = session.installFetch();
 await session.start();
-if (!session.manifestUrl) throw new Error('ROUTE SLS did not deliver a DASH/HLS manifest');
-await shakaPlayer.load(session.manifestUrl); // DASH MPD or HLS .m3u8
+const manifestUrl = await session.waitForManifest(); // also waits for SLS-only manifests
+await shakaPlayer.load(manifestUrl); // DASH MPD or HLS .m3u8
 ```
 
 `start()` reads the DS's `/slt/`, joins the service's SLS leg and takes the
 manifest from the service's `PresentationManifest` when present. If the SLT
 omits it, the first DASH/HLS manifest retained from the multicast SLS bundle
-becomes `session.manifestUrl`; its relative path is resolved against the DS
-authority from `sltUrl`. The sender labels ROUTE
+becomes `session.manifestUrl` after the first SLS bytes arrive. Use
+`waitForManifest()` when the SLT may omit it; its relative path is resolved
+against the DS authority from `sltUrl`. The sender labels ROUTE
 objects with DS-root paths (`live/seg-1.m4s`), so the session resolves
 Content-Locations against the DS origin root and caches only URLs under the
 manifest's directory (`https://live.example/live/`). `session.manifestUrl` is
