@@ -17,6 +17,7 @@ import (
 	"github.com/blockcast/multicast/atsc/models"
 	"github.com/blockcast/multicast/common"
 	"github.com/blockcast/multicast/flutelib"
+	"github.com/blockcast/multicast/lct/extension"
 	"github.com/blockcast/multicast/route"
 )
 
@@ -37,6 +38,10 @@ type fixture struct {
 	MediaGroup       string   `json:"mediaGroup"`
 	MediaPort        uint     `json:"mediaPort"`
 	MediaSource      string   `json:"mediaSource"`
+	RepairGroup      string   `json:"repairGroup"`
+	RaptorQSymbol    uint16   `json:"raptorqSymbolLength"`
+	RaptorQBlock     uint32   `json:"raptorqSourceBlockLength"`
+	RaptorQMaxNumEs  uint32   `json:"raptorqMaxNumEs"`
 }
 
 // rawManifest keeps the HLS playlist bytes in the multipart SLS part. The
@@ -99,6 +104,11 @@ func main() {
 		mediaGroup  = "239.21.4.2"
 		mediaPort   = 5005
 		mediaSource = "192.0.2.11"
+		repairGroup = "239.21.4.3"
+		// The deployed staging RepairFlow: RaptorQ T=1344, K=10, 25% overhead.
+		rqSymbol   = 1344
+		rqBlock    = 10
+		rqMaxNumEs = 13
 	)
 	fdt, err := flutelib.NewFDT(
 		mediaSource+","+mediaGroup+",5005", 1, 1, nil,
@@ -137,6 +147,24 @@ func main() {
 				}},
 				Payload: []models.PayloadType{{CodePoint: 8, FormatId: 1, SrcFecPayloadId: 0}},
 			},
+		}},
+	}, {
+		// The staging sender's repair plane: a separate group whose RepairFlow
+		// signals RaptorQ only through the 28-byte fecOTI and names the media
+		// source flow as its ProtectedObject. Repair TOIs equal source TOIs.
+		SIpAddr: models.IPv4addressType(mediaSource),
+		DIpAddr: models.IPv4addressType(repairGroup),
+		DPort:   mediaPort,
+		LS: []models.LSessionType{{
+			Tsi: 1,
+			RepairFlow: &models.RprFlowType{FECParameters: &models.FecParametersType{
+				Overhead: 25,
+				FecOTI:   flutelib.FecOTIType(raptorqOTI(rqSymbol, rqBlock, rqMaxNumEs)),
+				ProtectedObject: []*models.ProtectedObjectType{{
+					SessionDescription: fmt.Sprintf("dIpAddr=%s,dPort=%d,sIpAddr=%s", mediaGroup, mediaPort, mediaSource),
+					Tsi:                1,
+				}},
+			}},
 		}},
 	}}}
 
@@ -192,7 +220,27 @@ func main() {
 		MediaGroup:       mediaGroup,
 		MediaPort:        mediaPort,
 		MediaSource:      mediaSource,
+		RepairGroup:      repairGroup,
+		RaptorQSymbol:    rqSymbol,
+		RaptorQBlock:     rqBlock,
+		RaptorQMaxNumEs:  rqMaxNumEs,
 	}); err != nil {
 		panic(err)
 	}
+}
+
+// raptorqOTI is the RFC 6330 EXT_FTI image the sender advertises as a
+// RepairFlow fecOTI (route.StaticPlaneFTI).
+func raptorqOTI(symbolLen uint16, maxSbLen, maxNumEs uint32) []byte {
+	oti, err := (&extension.RaptorQFTIHeaderExt{
+		BaseFTIHeaderExt: extension.BaseFTIHeaderExt{ESLen: symbolLen, MaxSbLen: maxSbLen},
+		NumSrcBlks:       1,
+		NumSubBlks:       1,
+		SymAlignParam:    8,
+		MaxNumEs:         maxNumEs,
+	}).MarshalBinary()
+	if err != nil {
+		panic(fmt.Errorf("RaptorQ fecOTI: %w", err))
+	}
+	return oti
 }

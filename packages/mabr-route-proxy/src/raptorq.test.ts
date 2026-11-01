@@ -328,6 +328,8 @@ test('supports multi-block geometry and a partial final object', async () => {
   gateway.deliver();
   assert.deepEqual([...new Uint8Array(await (await session.fetch('https://player.test/live/partial.m4s')).arrayBuffer())], [1, 2, 3, 4, 5, 6]);
   assert.deepEqual([...fec.decoders[0].oti], [0, 0, 0, 0, 4, 0, 0, 4, 1, 0, 1, 1]);
-  assert.deepEqual([...fec.decoders[1].oti], [0, 0, 0, 0, 4, 0, 0, 4, 1, 0, 1, 1]);
+  // The sender encodes the short final block K'-native: its decoder takes the
+  // block's 2 real bytes, not MaxSbLen symbols (BLO-51223).
+  assert.deepEqual([...fec.decoders[1].oti], [0, 0, 0, 0, 2, 0, 0, 4, 1, 0, 1, 1]);
   await session.stop();
 });

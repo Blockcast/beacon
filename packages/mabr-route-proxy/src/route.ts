@@ -528,11 +528,17 @@ function sameGeometry(left: RouteRaptorQGeometry, right: RouteRaptorQGeometry): 
     left.expectedBlocks === right.expectedBlocks;
 }
 
-function makeBlockDecoder(module: RouteRaptorQWasmModule, object: RouteRaptorQObject): RouteRaptorQDecoderHandle {
-  // Blockcast's sender uses fixed-K interleaved blocks. Decode one SBN at a
-  // time with K'=MaxSbLen and normalize that block's SBN to zero below.
+function blockByteLength(object: RouteRaptorQObject, sbn: number): number {
+  return Math.min(object.blockLength, object.transferLength - sbn * object.blockLength);
+}
+
+function makeBlockDecoder(module: RouteRaptorQWasmModule, object: RouteRaptorQObject, sbn: number): RouteRaptorQDecoderHandle {
+  // Blockcast's sender encodes each block of MaxSbLen symbols as its own RFC
+  // 6330 object, the final block K'-native short (K = ceil(bytes / T)). Decode
+  // one SBN at a time with that block's byte length and normalize its SBN to
+  // zero below.
   return module.RaptorQDecoder.with_params(
-    BigInt(object.blockLength),
+    BigInt(blockByteLength(object, sbn)),
     object.symbolSize,
     1,
     object.numSubBlks,
@@ -696,14 +702,14 @@ class RouteRaptorQCollector {
       let block = object.blocks.get(packet.sbn);
       if (!block) {
         if (packet.sbn >= object.expectedBlocks || object.blocks.size >= this.#maxBlocksPerObject) return;
-        block = { decoder: makeBlockDecoder(this.#module, object), data: undefined };
+        block = { decoder: makeBlockDecoder(this.#module, object, packet.sbn), data: undefined };
         object.blocks.set(packet.sbn, block);
       }
       if (block.data) return;
       let complete = block.decoder?.add_packet(makeEncodingPacket(packet)) ?? false;
       if (!complete) complete = block.decoder?.is_complete() ?? false;
       if (complete) {
-        block.data = new Uint8Array(block.decoder!.get_result()).subarray(0, object.blockLength).slice();
+        block.data = new Uint8Array(block.decoder!.get_result()).subarray(0, blockByteLength(object, packet.sbn)).slice();
         block.decoder!.free();
         block.decoder = undefined;
       }
