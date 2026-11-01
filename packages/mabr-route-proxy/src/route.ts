@@ -218,6 +218,25 @@ function normalizeRouteSource(value?: string): string | undefined {
   return source;
 }
 
+/**
+ * Prefer a presentation playlist when SLS carries both an HLS master and its
+ * media playlists. DASH MPDs and HLS multivariant playlists are presentation
+ * manifests; an HLS playlist with only EXTINF entries is a rendition playlist.
+ * Keep the original order for candidates with the same rank.
+ */
+function manifestRank(location: string, data?: Uint8Array): number {
+  const pathname = location.split(/[?#]/, 1)[0]!.toLowerCase();
+  if (pathname.endsWith('/manifest.mpd') || pathname === 'manifest.mpd') return 0;
+  if (pathname.endsWith('.mpd')) return 1;
+  if (!pathname.endsWith('.m3u8')) return Number.POSITIVE_INFINITY;
+  // SLT only gives us the URL, so use conventional presentation names when
+  // its body is not available. The SLS path below can classify HLS by its
+  // playlist tags, which is more authoritative.
+  if (!data) return /(?:^|[/_-])(?:manifest|master|index)(?:[-_.]|$)/i.test(pathname) ? 2 : 3;
+  const body = decoder.decode(data);
+  return /#ext-x-(?:stream-inf|iframe-stream-inf|media):/i.test(body) ? 2 : 3;
+}
+
 function serviceMatches(selector: string | number, numericId: string, globalId: string): boolean {
   const wanted = String(selector).trim();
   if (wanted === numericId || wanted === globalId) return true;
@@ -239,18 +258,21 @@ function advertisedManifestUrl(body: string, authority: URL): string | undefined
       if (/\.(?:mpd|m3u8)(?:[?#].*)?$/i.test(value)) candidates.push(value);
     }
   }
+  let selected: { url: string; rank: number } | undefined;
   for (const candidate of candidates) {
     try {
       const parsed = new URL(candidate, authority);
       // The Blockcast PresentationManifest (urn:blockcast:route:1) is the DS's
       // public media URL. Do not allow an untrusted SLS document to redirect
       // the page to another origin.
-      if (parsed.origin === authority.origin) return parsed.href;
+      if (parsed.origin !== authority.origin) continue;
+      const rank = manifestRank(candidate);
+      if (!selected || rank < selected.rank) selected = {url: parsed.href, rank};
     } catch {
       // An optional malformed service URL must not hide a valid SLS leg.
     }
   }
-  return undefined;
+  return selected?.url;
 }
 
 function parseSltEndpoints(xml: string, serviceId?: string | number, authority?: URL): RouteEndpoint[] {
@@ -958,9 +980,25 @@ export class RouteMabrSession {
     this.#manifestUrl = undefined;
     const advertised = endpoints.find((endpoint) => endpoint.manifestUrl)?.manifestUrl;
     if (!advertised) return;
+    this.#scopeManifestLocation(advertised, true);
+  }
+
+  #scopeManifestLocation(advertised: string, allowPageBase = false): boolean {
     const pageBase = globalThis.location?.href ?? 'http://localhost/';
+    const explicitScope = this.#options.baseUrl !== undefined || this.#options.scope !== undefined;
+    if (!explicitScope && !this.#options.sltUrl && !allowPageBase) return false;
     if (this.#options.baseUrl === undefined && this.#options.scope === undefined) {
-      const manifest = new URL(advertised, pageBase);
+      let authority = pageBase;
+      // A manifest learned from the multicast SLS has a DS-root relative
+      // Content-Location. When SLT did not carry PresentationManifest, use
+      // the public DS authority supplied for HTTP discovery.
+      if (this.#options.sltUrl) {
+        try { authority = `${new URL(this.#options.sltUrl, pageBase).origin}/`; } catch { /* use page origin */ }
+      }
+      const manifest = new URL(advertised, authority);
+      if (this.#options.sltUrl && manifest.origin !== new URL(authority).origin) {
+        throw new RangeError(`ROUTE manifest ${manifest.href} is outside the DS origin`);
+      }
       const root = new URL('/', manifest).href;
       const scope = new URL('.', manifest).href;
       if (scope === root) {
@@ -970,17 +1008,22 @@ export class RouteMabrSession {
       }
       this.#proxy[rescope](root, scope);
       this.#manifestUrl = manifest.href;
-      return;
+      return true;
     }
     const baseUrl = this.#options.baseUrl ?? pageBase;
     const scope = new URL('.', new URL(this.#options.scope ?? baseUrl, baseUrl)).href;
-    // Resolve the manifest like a Content-Location: its path without the leading "/".
-    const manifest = new URL(advertised, baseUrl);
+    // Content-Location values emitted by the sender are DS-root relative.
+    // Resolve against the origin root first, then map that pathname onto the
+    // caller's explicit player base exactly once. Resolving directly against
+    // `baseUrl` would turn `nasa/iss/a/manifest.mpd` and
+    // `https://player/mabr/` into `/mabr/mabr/nasa/...` below.
+    const manifest = new URL(advertised, new URL('/', baseUrl));
     const manifestUrl = new URL(manifest.pathname.slice(1) + manifest.search, baseUrl).href;
     if (!manifestUrl.startsWith(scope)) {
       throw new RangeError(`ROUTE manifest ${manifestUrl} is outside the cache scope ${scope}`);
     }
     this.#manifestUrl = manifestUrl;
+    return true;
   }
 
   async stop(): Promise<void> {
@@ -1058,6 +1101,7 @@ export class RouteMabrSession {
     if (exports.route_sls_manifest && exports.route_sls_manifest_len &&
         exports.route_sls_manifest_location && exports.route_sls_manifest_location_len &&
         Number.isSafeInteger(count) && count > 0) {
+      const manifests: Array<{ location: string; data: Uint8Array; rank: number }> = [];
       for (let index = 0; index < count; index++) {
         const bodyPointer = exports.route_sls_manifest(index);
         const bodyLength = exports.route_sls_manifest_len();
@@ -1069,8 +1113,25 @@ export class RouteMabrSession {
           exports.route_sls_manifest_location(index),
           exports.route_sls_manifest_location_len(),
         );
-        if (location) this.#proxy.put({ url: location, data });
+        if (location) {
+          if (/\.(?:mpd|m3u8)(?:[?#].*)?$/i.test(location)) {
+            manifests.push({ location, data, rank: manifestRank(location, data) });
+          }
+          // Cache non-manifest objects immediately. Manifest objects are put
+          // after the preferred candidate has established the cache scope.
+          if (!/\.(?:mpd|m3u8)(?:[?#].*)?$/i.test(location)) {
+            this.#proxy.put({ url: location, data });
+          }
+        }
       }
+      const canDeriveManifest = this.#options.sltUrl !== undefined ||
+        this.#options.baseUrl !== undefined || this.#options.scope !== undefined;
+      if (!this.#manifestUrl && canDeriveManifest && manifests.length > 0) {
+        const preferred = manifests.reduce((best, candidate) =>
+          candidate.rank < best.rank ? candidate : best);
+        try { this.#scopeManifestLocation(preferred.location); } catch { /* leave HTTP fallback in charge */ }
+      }
+      for (const manifest of manifests) this.#proxy.put({ url: manifest.location, data: manifest.data });
       return;
     }
     if (!exports.route_get_mpd || !exports.route_get_mpd_len ||
