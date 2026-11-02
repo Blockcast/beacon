@@ -1,0 +1,99 @@
+name: mabr-route-proxy e2e (pim lane)
+
+# BLO-51223 AC3: every change to packages/mabr-route-proxy must run the real
+# route.wasm -> RaptorQ -> Shaka e2e. The private route.wasm, fec-raptorq and
+# Shaka inputs live in pim-multicast-gateway, whose `route-mabr-e2e.yml` lane
+# builds them and runs this package's `npm run test:e2e` at `beacon_ref`. This
+# job dispatches that lane at this commit and fails if it does not succeed.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/mabr-route-proxy/**'
+      - '.github/workflows/mabr-route-proxy-e2e.yml'
+  pull_request:
+    paths:
+      - 'packages/mabr-route-proxy/**'
+      - '.github/workflows/mabr-route-proxy-e2e.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pim-e2e:
+    # Fork PRs get no secrets; the lane runs again on the push to main.
+    if: ${{ !github.event.pull_request.head.repo.fork }}
+    runs-on:
+      group: default-tools
+      labels: arc-light
+    timeout-minutes: 150
+    env:
+      PIM: Blockcast/pim-multicast-gateway
+      BEACON_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - id: token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ secrets.PAPERCLIP_APP_ID }}
+          private-key: ${{ secrets.PAPERCLIP_APP_PRIVATE_KEY }}
+          owner: Blockcast
+          repositories: pim-multicast-gateway
+          permission-actions: write
+
+      - id: dispatch
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          set -euo pipefail
+          id=$(gh api -X POST "repos/$PIM/actions/workflows/route-mabr-e2e.yml/dispatches" \
+            -f ref=main -f "inputs[beacon_ref]=$BEACON_SHA" -F return_run_details=true --jq .workflow_run_id)
+          test -n "$id" || { echo 'dispatch returned no workflow_run_id' >&2; exit 1; }
+          echo "pim run: https://github.com/$PIM/actions/runs/$id" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          cat > "$RUNNER_TEMP/wait.sh" <<'SH'
+          set -euo pipefail
+          for _ in $(seq 100); do
+            c=$(gh api "repos/$PIM/actions/runs/$RUN" --jq '.status + " " + (.conclusion // "")')
+            if [ "${c%% *}" = completed ]; then
+              echo "conclusion=${c#* }" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+            sleep 30
+          done
+          SH
+
+      # An App token lives one hour; the lane can queue and run longer, so the
+      # wait is split across two tokens.
+      - id: wait1
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          RUN: ${{ steps.dispatch.outputs.id }}
+        run: bash "$RUNNER_TEMP/wait.sh"
+
+      - id: token2
+        if: ${{ steps.wait1.outputs.conclusion == '' }}
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ secrets.PAPERCLIP_APP_ID }}
+          private-key: ${{ secrets.PAPERCLIP_APP_PRIVATE_KEY }}
+          owner: Blockcast
+          repositories: pim-multicast-gateway
+          permission-actions: read
+
+      - id: wait2
+        if: ${{ steps.wait1.outputs.conclusion == '' }}
+        env:
+          GH_TOKEN: ${{ steps.token2.outputs.token }}
+          RUN: ${{ steps.dispatch.outputs.id }}
+        run: bash "$RUNNER_TEMP/wait.sh"
+
+      - name: Require success
+        env:
+          C: ${{ steps.wait1.outputs.conclusion || steps.wait2.outputs.conclusion }}
+        run: |
+          echo "pim route-mabr-e2e conclusion: ${C:-timed out}"
+          test "$C" = success
