@@ -239,12 +239,14 @@ function manifestRank(location: string, data?: Uint8Array): number {
 
 function serviceMatches(selector: string | number, numericId: string, globalId: string): boolean {
   const wanted = String(selector).trim();
-  if (wanted === numericId || wanted === globalId) return true;
+  const normalizedWanted = wanted.toLowerCase().replace(/\.$/, '');
+  const normalizedGlobal = globalId.trim().toLowerCase().replace(/\.$/, '');
+  if (wanted === numericId || normalizedWanted === normalizedGlobal) return true;
   if (!wanted || !globalId) return false;
   // TO commonly supplies the DS XMLID while SLT carries the qualified
   // globalServiceID. Match only a complete DNS label; never use a substring.
-  const host = globalId.split('/')[0]!.split(':')[0]!;
-  return host.split('.').some((label) => label.localeCompare(wanted, undefined, { sensitivity: 'accent' }) === 0);
+  const host = normalizedGlobal.split('/')[0]!.split(':')[0]!;
+  return host.split('.').some((label) => label === normalizedWanted);
 }
 
 function advertisedManifestUrl(body: string, authority: URL): string | undefined {
@@ -342,7 +344,14 @@ export async function discoverSlsEndpoint(
     return response.text();
   };
   if (/\/slt\/\d+$/i.test(basePath) || /\.xml$/i.test(basePath)) {
-    const endpoints = parseSltEndpoints(await get(base.href), options.serviceId, new URL('/', base.origin));
+    const document = await get(base.href);
+    const authority = new URL('/', base.origin);
+    const hostEndpoints = options.serviceId === undefined
+      ? parseSltEndpoints(document, base.hostname, authority)
+      : [];
+    const endpoints = hostEndpoints.length > 0
+      ? hostEndpoints
+      : parseSltEndpoints(document, options.serviceId, authority);
     if (endpoints.length !== 1) throw new Error(`HTTP LLS advertised ${endpoints.length} ROUTE SLS endpoints`);
     return endpoints[0]!;
   }
@@ -357,7 +366,16 @@ export async function discoverSlsEndpoint(
   const documents = groups.length > 0
     ? await Promise.all([...new Set(groups)].map((group) => get(new URL(String(group), sltDirectory).href)))
     : [index];
-  const endpoints = documents.flatMap((document) => parseSltEndpoints(document, options.serviceId, new URL('/', base.origin)));
+  // A DS host normally names exactly one service (for example,
+  // cdn.nasa-iss-a.public-st.cdn.blockcast.net), while its SLT can list the
+  // other services on the same relay. Prefer that exact host when the caller
+  // does not provide a service selector; retain the single-service fallback
+  // for generic DS hosts whose globalServiceID is not their hostname.
+  const hostEndpoints = options.serviceId === undefined
+    ? documents.flatMap((document) => parseSltEndpoints(document, base.hostname, new URL('/', base.origin)))
+    : [];
+  const endpoints = (hostEndpoints.length > 0 ? hostEndpoints : documents.flatMap((document) =>
+    parseSltEndpoints(document, options.serviceId, new URL('/', base.origin))));
   const unique = [...new Map(endpoints.map((endpoint) => [
     `${endpoint.source ?? ''}\0${endpoint.group}\0${endpoint.port}\0${endpoint.manifestUrl ?? ''}`,
     endpoint,
