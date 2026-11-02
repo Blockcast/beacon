@@ -31,7 +31,7 @@ jobs:
     #
     # Keep publish on GitHub-hosted below: npm trusted publishing currently
     # requires a cloud-hosted runner for OIDC.
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'arc-light' }}
+    runs-on: ${{ fromJSON(github.event.pull_request.head.repo.fork && '{"labels":["ubuntu-latest"]}' || '{"group":"default-tools","labels":["arc-light"]}') }}
     permissions:
       contents: read
     steps:
@@ -277,7 +277,7 @@ jobs:
   privacy:
     # Same fork reasoning as `build` above: public repo + self-hosted pool +
     # `pull_request` would run a fork's tree on on-prem infrastructure.
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'arc-light' }}
+    runs-on: ${{ fromJSON(github.event.pull_request.head.repo.fork && '{"labels":["ubuntu-latest"]}' || '{"group":"default-tools","labels":["arc-light"]}') }}
     permissions:
       contents: read
     steps:
