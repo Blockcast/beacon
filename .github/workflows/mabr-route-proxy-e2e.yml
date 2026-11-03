@@ -36,18 +36,12 @@ jobs:
       PIM: Blockcast/pim-multicast-gateway
       BEACON_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
-      - id: token
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
-        with:
-          app-id: ${{ secrets.PAPERCLIP_APP_ID }}
-          private-key: ${{ secrets.PAPERCLIP_APP_PRIVATE_KEY }}
-          owner: Blockcast
-          repositories: pim-multicast-gateway
-          permission-actions: write
-
       - id: dispatch
         env:
-          GH_TOKEN: ${{ steps.token.outputs.token }}
+          # Beacon is public, so the private org PAPERCLIP_APP_* secrets are
+          # intentionally unavailable here. ARCAS_PAT is the existing
+          # repository secret with access to dispatch the pim lane.
+          GH_TOKEN: ${{ secrets.ARCAS_PAT }}
         run: |
           set -euo pipefail
           id=$(gh api -X POST "repos/$PIM/actions/workflows/route-mabr-e2e.yml/dispatches" \
@@ -66,28 +60,18 @@ jobs:
           done
           SH
 
-      # An App token lives one hour; the lane can queue and run longer, so the
-      # wait is split across two tokens.
+      # Keep a second bounded poll so a queued pim lane gets the full wait
+      # budget without making one shell step unbounded.
       - id: wait1
         env:
-          GH_TOKEN: ${{ steps.token.outputs.token }}
+          GH_TOKEN: ${{ secrets.ARCAS_PAT }}
           RUN: ${{ steps.dispatch.outputs.id }}
         run: bash "$RUNNER_TEMP/wait.sh"
-
-      - id: token2
-        if: ${{ steps.wait1.outputs.conclusion == '' }}
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
-        with:
-          app-id: ${{ secrets.PAPERCLIP_APP_ID }}
-          private-key: ${{ secrets.PAPERCLIP_APP_PRIVATE_KEY }}
-          owner: Blockcast
-          repositories: pim-multicast-gateway
-          permission-actions: read
 
       - id: wait2
         if: ${{ steps.wait1.outputs.conclusion == '' }}
         env:
-          GH_TOKEN: ${{ steps.token2.outputs.token }}
+          GH_TOKEN: ${{ secrets.ARCAS_PAT }}
           RUN: ${{ steps.dispatch.outputs.id }}
         run: bash "$RUNNER_TEMP/wait.sh"
 
