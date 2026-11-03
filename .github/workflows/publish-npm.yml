@@ -19,6 +19,7 @@ env:
 
 jobs:
   build:
+    timeout-minutes: 120
     # Fork PRs are skipped: this job runs npm lifecycle scripts from the PR
     # tree, which must never execute attacker-controlled code on ARC.
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork }}
@@ -268,6 +269,7 @@ jobs:
   # Scoped to the working tree on purpose -- the tarball gate stays the
   # artifact-surface check and is deliberately NOT this mechanism.
   privacy:
+    timeout-minutes: 120
     # Fork PRs are skipped for the same ARC trust boundary as build.
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork }}
     runs-on: {group: default-tools, labels: arc-light}
