@@ -160,6 +160,9 @@ function samePacketIdFilter(a, b) {
  * multicast-contract 1.4.0 it is not subject to `packetIds` (records are split
  * out before packet_id routing, 7.2.7), so every filter admits it. The bridge
  * server has already applied the source, destination and (S, G, port) checks.
+ * An MMTP packet whose header opens 4D 48 (packet_id 0x4D32) collides with
+ * "MHM2" and is admitted too; contract 1.4.0 and 7.2.3 accept that collision.
+ * It fails open and loses nothing, so do not "fix" it into a drop.
  */
 const MANIFEST_RECORD = -1;
 
