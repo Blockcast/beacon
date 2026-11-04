@@ -153,13 +153,32 @@ function samePacketIdFilter(a, b) {
   return packetIdFilterCovers(a, b) && packetIdFilterCovers(b, a);
 }
 
-/** MMTP packet_id from the fixed four-byte header prefix, or undefined. */
+/**
+ * Stands in for a packet ID when a datagram opens with "MHM2": an in-band
+ * manifest record (draft-ramadan-moq-multicast-02 7.2.3), not an MMTP packet.
+ * Read as an MMTP header it would name packet_id 0x4D32. Under
+ * multicast-contract 1.4.0 it is not subject to `packetIds` (records are split
+ * out before packet_id routing, 7.2.7), so every filter admits it. The bridge
+ * server has already applied the source, destination and (S, G, port) checks.
+ */
+const MANIFEST_RECORD = -1;
+
+function isManifestRecordAt(bytes, offset) {
+  return bytes.byteLength - offset >= 4 && bytes[offset] === 0x4d && bytes[offset + 1] === 0x48
+    && bytes[offset + 2] === 0x4d && bytes[offset + 3] === 0x32;
+}
+
+/**
+ * MMTP packet_id from the fixed four-byte header prefix, `MANIFEST_RECORD`
+ * for an in-band manifest record, or undefined.
+ */
 function mmtpPacketIdOf(data) {
   let bytes;
   if (data instanceof ArrayBuffer) bytes = new Uint8Array(data, 0, Math.min(4, data.byteLength));
   else if (ArrayBuffer.isView(data)) {
     bytes = new Uint8Array(data.buffer, data.byteOffset, Math.min(4, data.byteLength));
   } else return undefined;
+  if (isManifestRecordAt(bytes, 0)) return MANIFEST_RECORD;
   return bytes.byteLength >= 4 ? (bytes[2] << 8) | bytes[3] : undefined;
 }
 
@@ -191,6 +210,7 @@ PacketEvent.prototype = Object.prototype;
  * frame.subarray(offset)`, read in place without a view.
  */
 function mmtpPacketIdAt(frame, offset) {
+  if (isManifestRecordAt(frame, offset)) return MANIFEST_RECORD;
   return frame.byteLength - offset >= 4 ? (frame[offset + 2] << 8) | frame[offset + 3] : undefined;
 }
 
@@ -218,7 +238,7 @@ function packetsAdmittedBy(filter, items, events = items) {
   let admitted = null;
   for (let i = 0; i < items.length; i++) {
     const packetId = packetIdOfEvent(events[i]);
-    const admits = packetId !== undefined && filter.has(packetId);
+    const admits = packetId === MANIFEST_RECORD || (packetId !== undefined && filter.has(packetId));
     if (admitted) {
       if (admits) admitted.push(items[i]);
     } else if (!admits) {

@@ -1126,3 +1126,31 @@ test('a shared bytes receiver keeps its list when the native setPacketIds reache
   assert.deepEqual(bridge.calls.setPacketIds, [[1, 3, 4], [1, 3, 4]]);
   await sub.unsubscribe();
 });
+
+test('an MHM2 manifest record passes a packetIds filter; an unlisted packet ID does not (contract 1.4.0)', async () => {
+  const { client } = fakeServerClient();
+  const sub = await client.subscribe(GROUP, PORT, SOURCE, { mode: 'tunnel', packetIds: [1] });
+  const received = [];
+  sub.setCallbacks({ onpackets(events) { for (const event of events) received.push(new Uint8Array(event.data)); } });
+  // "MHM2" read as an MMTP header names packet_id 0x4D32, which is not listed.
+  const record = new Uint8Array([0x4d, 0x48, 0x4d, 0x32, 0x01]);
+  client.subscriptionCallbacks.get(SUBSCRIPTION_ID).onpackets(
+    [record.buffer, mmtpPacket(0x4d32), mmtpPacket(2), mmtpPacket(1)].map((data) => ({ data })),
+  );
+  assert.deepEqual(received.map((b) => [...b.subarray(0, 4)]), [[0x4d, 0x48, 0x4d, 0x32], [0x40, 0x00, 0x00, 0x01]]);
+
+
+  // The ingest path reads the verdict from the stream frame, on both layers.
+  const bytesSub = await subscribeMulticastBridgeBytes(client, { ...bytesConfig, packetIds: [1] });
+  const batches = [];
+  bytesSub.addEventListener('packets', (event) => batches.push(event.detail));
+  client._streamSubscriptions.set(0, SUBSCRIPTION_ID);
+  client._beginPacketBatch();
+  client._handleStreamMessage(new Uint8Array([0x00, 0x00, 0x4d, 0x48, 0x4d, 0x32, 0x02]));
+  client._handleStreamMessage(streamFrame(0x4d32));
+  client._handleStreamMessage(streamFrame(3));
+  client._endPacketBatch();
+  assert.equal(batches.length, 1);
+  assert.deepEqual(batches[0].map((d) => [...new Uint8Array(d)]), [[0x4d, 0x48, 0x4d, 0x32, 0x02]]);
+  await bytesSub.unsubscribe();
+});
