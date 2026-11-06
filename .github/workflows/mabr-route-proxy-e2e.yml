@@ -30,7 +30,7 @@ jobs:
     if: ${{ !github.event.pull_request.head.repo.fork }}
     runs-on:
       group: default-tools
-      labels: arc-light
+      labels: arc-default
     timeout-minutes: 150
     env:
       PIM: Blockcast/pim-multicast-gateway
