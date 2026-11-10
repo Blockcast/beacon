@@ -839,6 +839,43 @@ test('selects the service named by the DS hostname when no serviceId is supplied
   }
 });
 
+test('scopes origin SLT discovery to the DS hostname when the listing has multiple services', async () => {
+  const originalFetch = globalThis.fetch;
+  const urls: string[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    urls.push(url);
+    if (url === 'https://cdn.nasa-iss-b.public-st.cdn.blockcast.net/slt/') {
+      return new Response('<ul><li><a href="1">1</a></li></ul>');
+    }
+    if (url === 'https://cdn.nasa-iss-b.public-st.cdn.blockcast.net/slt/1') {
+      return new Response(
+        '<SltType>' +
+          '<Service serviceId="20" globalServiceID="cdn.nasa-iss-a.public-st.cdn.blockcast.net"><BroadcastSvcSignaling slsProtocol="1" slsDestinationIpAddress="232.1.1.66" slsDestinationUdpPort="8000" /></Service>' +
+          '<Service serviceId="21" globalServiceID="cdn.nasa-iss-b.public-st.cdn.blockcast.net"><PresentationManifest xmlns="urn:blockcast:route:1">/nasa/iss/b/master.m3u8</PresentationManifest><BroadcastSvcSignaling slsProtocol="1" slsDestinationIpAddress="232.1.1.70" slsDestinationUdpPort="8000" slsSourceIpAddress="69.25.95.61" /></Service>' +
+        '</SltType>',
+      );
+    }
+    return new Response('missing', {status: 404});
+  }) as typeof fetch;
+  try {
+    assert.deepEqual(await discoverSlsEndpoint({
+      sltUrl: 'https://cdn.nasa-iss-b.public-st.cdn.blockcast.net',
+    }), {
+      group: '232.1.1.70',
+      port: 8000,
+      source: '69.25.95.61',
+      manifestUrl: 'https://cdn.nasa-iss-b.public-st.cdn.blockcast.net/nasa/iss/b/master.m3u8',
+    });
+    assert.deepEqual(urls, [
+      'https://cdn.nasa-iss-b.public-st.cdn.blockcast.net/slt/',
+      'https://cdn.nasa-iss-b.public-st.cdn.blockcast.net/slt/1',
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('discovers a TO delivery path from the Blockcast SLT extension', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async () => new Response(
