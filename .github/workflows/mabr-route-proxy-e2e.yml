@@ -31,7 +31,10 @@ jobs:
     runs-on:
       group: default-tools
       labels: arc-light
-    timeout-minutes: 150
+    # The PIM lane builds route.wasm, fec-raptorq, and Shaka from scratch on a
+    # cold runner. That can exceed 100 minutes before the browser test starts.
+    # Leave enough room for one queued build without making the check unbounded.
+    timeout-minutes: 240
     env:
       PIM: Blockcast/pim-multicast-gateway
       BEACON_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -51,7 +54,7 @@ jobs:
           echo "id=$id" >> "$GITHUB_OUTPUT"
           cat > "$RUNNER_TEMP/wait.sh" <<'SH'
           set -euo pipefail
-          for _ in $(seq 100); do
+          for _ in $(seq 220); do
             c=$(gh api "repos/$PIM/actions/runs/$RUN" --jq '.status + " " + (.conclusion // "")')
             if [ "${c%% *}" = completed ]; then
               echo "conclusion=${c#* }" >> "$GITHUB_OUTPUT"; exit 0
