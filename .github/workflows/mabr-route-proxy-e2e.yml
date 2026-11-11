@@ -55,7 +55,14 @@ jobs:
           cat > "$RUNNER_TEMP/wait.sh" <<'SH'
           set -euo pipefail
           for _ in $(seq 220); do
-            c=$(gh api "repos/$PIM/actions/runs/$RUN" --jq '.status + " " + (.conclusion // "")')
+            # GitHub can return 404 for a just-created cross-repository run
+            # while its record is becoming visible to the dispatch token.
+            # Treat that as queued and keep polling instead of failing the
+            # whole Beacon check.
+            if ! c=$(gh api "repos/$PIM/actions/runs/$RUN" --jq '.status + " " + (.conclusion // "")'); then
+              sleep 30
+              continue
+            fi
             if [ "${c%% *}" = completed ]; then
               echo "conclusion=${c#* }" >> "$GITHUB_OUTPUT"; exit 0
             fi
