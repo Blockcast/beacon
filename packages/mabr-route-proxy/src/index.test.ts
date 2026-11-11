@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { discoverSlsEndpoint, MabrRouteProxy } from './index.ts';
+import { discoverSlsEndpoint, MabrRouteProxy, RouteRaptorQCollector } from './index.ts';
 import { rescope } from './proxy.ts';
 
 test('exports DS SLS discovery from the package entry point', async () => {
@@ -24,6 +24,10 @@ test('exports DS SLS discovery from the package entry point', async () => {
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('exports the browser-side RaptorQ collector from the package entry point', () => {
+  assert.equal(typeof RouteRaptorQCollector, 'function');
 });
 
 test('serves cached CMAF bytes and falls through misses', async () => {

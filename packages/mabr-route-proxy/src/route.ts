@@ -650,7 +650,7 @@ function drainRaptorQ(exports: RouteWasmExports, collector: RouteRaptorQCollecto
   }
 }
 
-class RouteRaptorQCollector {
+export class RouteRaptorQCollector {
   readonly #module: RouteRaptorQWasmModule;
   readonly #maxObjects: number;
   readonly #maxObjectBytes: number;
