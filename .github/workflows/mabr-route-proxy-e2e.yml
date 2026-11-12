@@ -28,9 +28,9 @@ jobs:
   pim-e2e:
     # Fork PRs get no secrets; the lane runs again on the push to main.
     if: ${{ !github.event.pull_request.head.repo.fork }}
-    runs-on:
-      group: default-tools
-      labels: arc-light
+    # This job only dispatches and polls the PIM workflow; it does not need a
+    # self-hosted runner or access to the repository's Docker pools.
+    runs-on: ubuntu-latest
     # The PIM lane builds route.wasm, fec-raptorq, and Shaka from scratch on a
     # cold runner. That can exceed 100 minutes before the browser test starts.
     # Leave enough room for one queued build without making the check unbounded.
