@@ -404,6 +404,12 @@ const ATSC_LLS_MULTICAST_PORT = 4937;
 // stream that this client consumes.
 export const BCDS_BRIDGE_PROTOCOL = 'bcds-v1';
 
+// ROOT-01 R1: the bridge-protocol revision stamped on every subscribe, so a
+// receiver can tell this client apart from one that predates the stamp (which
+// sends no field). Receivers record it; nothing rejects on it yet (that is R2).
+// Raised only by an explicit commit.
+export const BRIDGE_PROTOCOL_VERSION = 1;
+
 export function isBcdsBridgeCapability(value) {
   return value &&
     typeof value === 'object' &&
@@ -5158,6 +5164,7 @@ export class BridgeClient {
       type: 'subscribe',
       request_id: requestId,
       client_type: 'bridge',
+      bridge_protocol_version: BRIDGE_PROTOCOL_VERSION,
       page_url: location.href,
     };
     if (entry.group) msg.group = entry.group;
