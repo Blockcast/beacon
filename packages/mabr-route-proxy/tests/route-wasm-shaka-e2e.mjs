@@ -13,7 +13,7 @@
 // byte-offset source flow, sends the staging sender's RaptorQ repair plane on
 // its own S-TSID RepairFlow group, and verifies that recovered media plus
 // ordinary ROUTE DASH objects are
-// consumed by Shaka. Network ingress is simulated; native and AMT joins
+// consumed by Shaka. Network ingress is simulated; native, AMT, and tuner joins
 // are checked as gateway configuration contracts.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -376,7 +376,7 @@ try {
     }
   };
   for (const shakaVariant of shakaVariants) {
-    for (const ingress of ['native', 'amt']) {
+    for (const ingress of ['native', 'amt', 'tuner']) {
       const state = await openPage(`ingress=${ingress}&shaka=${shakaVariant.name}`);
       assert.equal(state.fec.location, 'hls/hls11.m4s');
       assert.equal(state.fec.droppedSource, 1);
@@ -387,10 +387,14 @@ try {
           { group: slsFixture.mediaGroup, port: slsFixture.mediaPort, source: slsFixture.mediaSource, consume: 'bytes', origin: 'ip-multicast' },
           { group: slsFixture.repairGroup, port: slsFixture.mediaPort, source: slsFixture.mediaSource, consume: 'bytes', origin: 'ip-multicast' },
         ]
-        : [
+        : ingress === 'amt' ? [
           { group: slsFixture.slsGroup, port: slsFixture.slsPort, source: slsFixture.slsSource, consume: 'bytes', origin: 'amt', discovery: 'driad' },
           { group: slsFixture.mediaGroup, port: slsFixture.mediaPort, source: slsFixture.mediaSource, consume: 'bytes', origin: 'amt', discovery: 'driad' },
           { group: slsFixture.repairGroup, port: slsFixture.mediaPort, source: slsFixture.mediaSource, consume: 'bytes', origin: 'amt', discovery: 'driad' },
+        ] : [
+          { group: slsFixture.slsGroup, port: slsFixture.slsPort, source: slsFixture.slsSource, consume: 'bytes', origin: 'tuner', standard: 'atsc3', protocol: 'route' },
+          { group: slsFixture.mediaGroup, port: slsFixture.mediaPort, source: slsFixture.mediaSource, consume: 'bytes', origin: 'tuner', standard: 'atsc3', protocol: 'route' },
+          { group: slsFixture.repairGroup, port: slsFixture.mediaPort, source: slsFixture.mediaSource, consume: 'bytes', origin: 'tuner', standard: 'atsc3', protocol: 'route' },
         ];
       assert.deepEqual(state.gatewayConfigs, expectedGatewayConfigs);
       console.log(`${shakaVariant.name}/${ingress}: ${state.log.join('; ')}`);
@@ -405,7 +409,7 @@ try {
   assert.ok(requests.includes('/slt/7'), 'HTTP SLT document was not requested');
   const mediaRequests = requests.filter((path) => path.startsWith('/mabr/'));
   assert.deepEqual(mediaRequests, [], `cached media escaped to HTTP: ${mediaRequests.join(', ')}`);
-  console.log('PASS: real route.wasm + RaptorQ loss recovery reached Shaka DASH/HLS; native and AMT gateway contracts passed; derived DS URLs played DASH from the ROUTE cache (network ingress simulated)');
+  console.log('PASS: real route.wasm + RaptorQ loss recovery reached Shaka DASH/HLS; native, AMT, and tuner gateway contracts passed; derived DS URLs played DASH from the ROUTE cache (network ingress simulated)');
 } finally {
   await browser.close();
   await new Promise((resolveServer) => server.close(resolveServer));
