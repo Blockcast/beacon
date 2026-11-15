@@ -25,3 +25,6 @@ export type {
   RouteWasmExports,
   RouteWasmHandle,
 } from './route.ts';
+
+export { createMulticastReceiverGateway, createRouteGateway } from './gateway.ts';
+export type { RouteProvider } from './gateway.ts';
