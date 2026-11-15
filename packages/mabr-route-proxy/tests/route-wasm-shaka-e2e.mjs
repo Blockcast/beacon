@@ -324,7 +324,7 @@ const server = http.createServer((request, response) => {
     response.end(raptorqWasm);
   } else if (path.startsWith('/mabr-route-proxy/')) {
     const modulePath = path.slice('/mabr-route-proxy/'.length);
-    if (!['index.js', 'proxy.js', 'route.js'].includes(modulePath)) {
+    if (!['index.js', 'proxy.js', 'route.js', 'gateway.js'].includes(modulePath)) {
       response.writeHead(404);
       response.end('module miss');
       return;
