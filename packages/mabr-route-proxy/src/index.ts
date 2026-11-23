@@ -25,3 +25,34 @@ export type {
   RouteWasmExports,
   RouteWasmHandle,
 } from './route.ts';
+
+export {
+  DEFAULT_ROUTE_POLICY_VERSION,
+  ShakaRouteHealthAdapter,
+  createShakaRouteHealthAdapter,
+  extractShakaRenditionBindings,
+  formatRouteHealthDiagnostic,
+  inferRoutePlaybackFormat,
+  mapRouteHealthToShakaRenditions,
+  matchRouteTemplate,
+  normalizeRoutePolicySnapshot,
+  normalizeRouteTransport,
+  routeTransportLabel,
+  routeTemplateRegExp,
+} from './route-health.ts';
+export type {
+  RouteHealthDiagnostic,
+  RouteHealthProvider,
+  RouteHealthState,
+  RouteHealthApplyResult,
+  RoutePlaybackFormat,
+  RoutePolicyContext,
+  RoutePolicyDecision,
+  RoutePolicySnapshot,
+  RouteRenditionHealth,
+  RouteRenditionMapping,
+  RouteTransport,
+  ShakaRenditionBinding,
+  ShakaRouteHealthAdapterOptions,
+  ShakaRoutePlayer,
+} from './route-health.ts';

@@ -129,6 +129,43 @@ const proxy = createRouteMabrSession({
 
 Call `stop()` and `restoreFetch()` when playback ends.
 
+## Shaka route-health policy adapter
+
+The proxy does not turn multicast/AMT receive bytes into Shaka's HTTP
+bandwidth estimate.  When the existing route.wasm receiver exposes the shared
+`gw-rendition-health/2` decision, attach the thin adapter after `player.load()`:
+
+```ts
+import {
+  createShakaRouteHealthAdapter,
+  formatRouteHealthDiagnostic,
+} from '@blockcast/mabr-route-proxy';
+
+const health = createShakaRouteHealthAdapter({
+  player,
+  provider: routeHealthProvider, // the WASM policy provider; no thresholds here
+  manifestUrl: session.manifestUrl,
+  onDiagnostic: (entry) => console.info(formatRouteHealthDiagnostic(entry)),
+});
+await player.load(session.manifestUrl!);
+await health.refresh();
+const stopHealth = health.start(); // optional provider/track update subscription
+```
+
+The adapter maps both HLS variants and DASH representations by the exact
+aliases/templates supplied by Shaka or the caller. It changes Shaka's
+`abr.restrictions.maxBandwidth` only when the policy explicitly says `cap` (or
+returns an explicit `max_bandwidth`); policy hysteresis and health thresholds
+remain in the receiver engine. Unknown policy versions, missing health and
+provider errors restore `Infinity`, leaving ordinary HTTP fallback and Shaka's
+own ABR active. `receive_bitrate_bps` and aggregate multicast/AMT bytes are
+diagnostic fields only.
+
+Diagnostics include format, rendition, TSI/TOI, state, policy reason and the
+provider-reported transport/path. If the browser's own `MulticastReceiver`
+does not report a source, the adapter emits `transport=unknown path=path not
+reported`; it never guesses direct IWA versus Mobile Beacon.
+
 The session uses the existing route.wasm completed-object ABI and its SLS
 manifest accessors (`route_sls_manifest*`, with `route_get_mpd*` as a legacy
 fallback); it does not reimplement ROUTE object assembly. Both DASH MPDs and
