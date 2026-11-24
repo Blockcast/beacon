@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { FakeMulticastProvider } from '../../multicast-contract/src/fake-gateway.ts';
+import { createRouteGateway } from './gateway.ts';
 import { createRouteMabrSession, type RouteGateway } from './route.ts';
 
 const encoder = new TextEncoder();
@@ -130,3 +131,55 @@ for (const ingress of ['native', 'amt'] as const) {
     }
   });
 }
+
+/** The user agent's receiver, open at once; `controller` feeds its stream. */
+class FakeMulticastReceiver {
+  static last: FakeMulticastReceiver;
+  options: unknown;
+  closeCalls = 0;
+  controller!: ReadableStreamDefaultController<Array<{ data: Uint8Array }>>;
+  readonly opened = Promise.resolve({
+    readable: new ReadableStream<Array<{ data: Uint8Array }>>({ start: (controller) => { this.controller = controller; } }),
+  });
+  readonly #closed = Promise.withResolvers<{ reason: string }>();
+  readonly closed = this.#closed.promise;
+  constructor(options: unknown) {
+    this.options = options;
+    FakeMulticastReceiver.last = this;
+  }
+  async close() {
+    this.closeCalls += 1;
+    this.#closed.resolve({ reason: 'test-close' });
+  }
+}
+
+test('fetches DASH and HLS CMAF objects after a MulticastReceiver datagram through createRouteGateway', async () => {
+  const wasm = routeWasmFixture();
+  const group = '232.1.1.66';
+  const session = createRouteMabrSession({
+    gateway: createRouteGateway({ MulticastReceiver: FakeMulticastReceiver }),
+    wasm,
+    ingress: 'native',
+    group,
+    port: 8000,
+    source: '192.0.2.10',
+    baseUrl: 'https://player.test/',
+    maxEntries: 20,
+  });
+  await session.start();
+  const receiver = FakeMulticastReceiver.last;
+  try {
+    assert.deepEqual(receiver.options, { groupAddress: group, sourceAddress: '192.0.2.10', localPort: 8000 });
+    receiver.controller.enqueue([{ data: Uint8Array.of(1, 2, 3) }]);
+    await new Promise((resolve) => setImmediate(resolve));
+    // The session wrote the datagram into route.wasm's input buffer, after the group.
+    assert.deepEqual(
+      [...new Uint8Array(wasm.exports.memory.buffer, wasm.exports.route_get_buffer() + group.length, 3)], [1, 2, 3]);
+    assert.match(await text(await session.fetch('https://player.test/live/dash/manifest.mpd')), /SegmentTemplate/);
+    assert.equal(await text(await session.fetch('https://player.test/live/hls/seg-1.m4s')), 'HLS-SEGMENT');
+    assert.equal(session.size, 7);
+  } finally {
+    await session.stop();
+  }
+  assert.equal(receiver.closeCalls, 1);
+});

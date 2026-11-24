@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readdirSync, readFileSync } from 'node:fs';
 import { discoverSlsEndpoint, MabrRouteProxy, RouteRaptorQCollector } from './index.ts';
+import { createMulticastReceiverGateway, createRouteGateway } from './index.ts';
 import { rescope } from './proxy.ts';
 
 test('exports DS SLS discovery from the package entry point', async () => {
@@ -28,6 +30,19 @@ test('exports DS SLS discovery from the package entry point', async () => {
 
 test('exports the browser-side RaptorQ collector from the package entry point', () => {
   assert.equal(typeof RouteRaptorQCollector, 'function');
+});
+
+test('exports the route gateways from the package entry point', () => {
+  assert.equal(typeof createRouteGateway, 'function');
+  assert.equal(typeof createMulticastReceiverGateway, 'function');
+});
+
+test('the browser e2e page server serves every module the entry point loads', () => {
+  const e2e = readFileSync(new URL('../tests/route-wasm-shaka-e2e.mjs', import.meta.url), 'utf8');
+  const modules = readdirSync(new URL('.', import.meta.url))
+    .filter((name) => name.endsWith('.ts') && !name.endsWith('.test.ts'))
+    .map((name) => name.replace(/\.ts$/, '.js'));
+  assert.deepEqual(modules.filter((name) => !e2e.includes(`'${name}'`)), []);
 });
 
 test('serves cached CMAF bytes and falls through misses', async () => {
