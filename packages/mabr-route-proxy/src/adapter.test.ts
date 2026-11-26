@@ -387,6 +387,8 @@ class FakeXhr extends EventTarget {
   withCredentials = false;
   responseType = '';
   status = 0;
+  readyState = 0;
+  static netBody = 'net';
   response: unknown = null;
   url = '';
   headers: Array<[string, string]> = [];
@@ -398,8 +400,10 @@ class FakeXhr extends EventTarget {
     FakeXhr.sent.push({ url: this.url, headers: this.headers });
     queueMicrotask(async () => {
       const blob = this.url.startsWith('blob:') ? resolveObjectURL(this.url) : undefined;
-      this.response = blob ? await blob.text() : 'net';
+      this.response = blob ? await blob.text() : FakeXhr.netBody;
       if (!blob) this.status = 200;
+      this.readyState = 4;
+      this.dispatchEvent(new Event('readystatechange'));
       this.dispatchEvent(new Event('load'));
       this.dispatchEvent(new Event('loadend'));
     });
@@ -538,3 +542,39 @@ test('adapter: a chunked manifest over the byte cap stops being read and is neve
   assert.deepEqual(trustCalls, []);
   assert.ok(pulled <= 4, `read stopped at the cap, pulled ${pulled}`);
 });
+
+for (const mode of ['onreadystatechange', 'load-listener-before-send'] as const) {
+  test(`adapter: XHR segment issued synchronously at playlist readyState 4 is served from ROUTE (${mode})`, async () => {
+    const M3U8 = '#EXTM3U\n#EXT-X-MAP:URI="init.mp4"\n#EXTINF:2,\nseg-1.m4s\n';
+    const sent: string[] = [];
+    class Xhr extends EventTarget {
+      responseType = ''; status = 0; response: unknown = null; readyState = 0; url = '';
+      onreadystatechange: ((this: Xhr) => void) | null = null;
+      open(_m: string, url: string) { this.url = url; this.readyState = 1; }
+      setRequestHeader() {}
+      getResponseHeader(n: string) { return n === 'content-type' ? 'application/vnd.apple.mpegurl' : null; }
+      abort() {}
+      send() {
+        sent.push(this.url);
+        queueMicrotask(() => {
+          this.status = 200; this.response = this.url.endsWith('.m3u8') ? M3U8 : 'x'; this.readyState = 4;
+          this.onreadystatechange?.call(this); // browser order: readystatechange(4) before load
+          this.dispatchEvent(new Event('load')); this.dispatchEvent(new Event('loadend'));
+        });
+      }
+    }
+    const proxy = new MabrRouteProxy({ baseUrl: `${DS}/`, scope: `${DS}/live/`, transparent: { unauthenticatedSegments: [DS] } });
+    proxy.put({ url: seg(1), data: Uint8Array.of(1), contentType: 'video/mp4' });
+    const g = { fetch: (async () => new Response('net')) as typeof fetch, location: { href: `${DS}/p.html`, origin: DS }, XMLHttpRequest: Xhr } as unknown as AdapterGlobal;
+    installTransparentAdapter(proxy, { global: g });
+    await new Promise<void>((done) => {
+      const getSeg = () => { const s = new Xhr(); s.open('GET', seg(1)); s.addEventListener('loadend', () => done()); s.send(); };
+      const pl = new Xhr();
+      pl.open('GET', `${DS}/live/media.m3u8`);
+      if (mode === 'onreadystatechange') pl.onreadystatechange = function() { if (this.readyState === 4) getSeg(); };
+      else pl.addEventListener('load', getSeg);
+      pl.send();
+    });
+    assert.ok(sent[1]!.startsWith('blob:'), `segment went to network: ${sent.join(', ')}`);
+  });
+}
