@@ -108,6 +108,20 @@ const proxy = createRouteMabrSession({
 });
 ```
 
+### Resolver API (adapter-neutral)
+
+`proxy.resolve(input, init?)` returns the ROUTE-cached `Response`, or
+`undefined` when the caller must go to the network (miss, URL outside the
+scope, `cache: 'no-store' | 'reload'`, non GET/HEAD). Any interception
+mechanism (page-world fetch/XHR patch, service worker, extension) can call it;
+`installFetch()` and `proxy.fetch()` are built on it, so scope rules and
+`onCacheEvent` / `stats` telemetry are identical.
+
+```ts
+const hit = await proxy.resolve(url, init);
+return hit ?? fetch(url, init);
+```
+
 The proxy patches only `fetch`, returns a normal `Response`, and falls through
 to the network on a cache miss and for requests sent with `cache: 'no-store'`
 or `'reload'`. Use `cacheStats` or `onCacheEvent` to make cache-miss fallback
