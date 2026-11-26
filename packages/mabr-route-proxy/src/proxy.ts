@@ -4,6 +4,8 @@
  * the URLs an ordinary DASH/HLS player already requests.
  */
 
+import { isNamed, manifestNames, type ManifestNames } from './manifest-names.ts';
+
 export interface RoutePayload {
   /** ROUTE TOI as emitted by the existing parser (preserve uint64 as bigint/string). */
   toi: bigint | number | string;
@@ -52,6 +54,31 @@ export interface ByteSubscription {
   removeEventListener(type: 'bytes', listener: (event: CustomEvent<ArrayBuffer>) => void): void;
 }
 
+/**
+ * Hardening for transparent interception (threat model
+ * docs/threat-model/route-interception.md). Passing this option turns it on;
+ * without it the proxy behaves as before for page-opt-in `installFetch()`.
+ */
+export interface TransparentPolicy {
+  /**
+   * DS origins whose segments may be answered without a per-segment digest
+   * (R11). Absent or empty: ROUTE answers no segment. No digest channel exists
+   * yet, so this is the only way to enable segment serving.
+   */
+  unauthenticatedSegments?: readonly string[];
+  /**
+   * Authenticates a multicast-carried manifest against the DS over HTTPS (R9).
+   * Absent: multicast manifests are never served, the manifest comes over unicast (R8).
+   */
+  verifyManifest?: (url: string, body: ArrayBuffer) => boolean | Promise<boolean>;
+  /** Largest cached object, default 32 MiB (R6). */
+  maxEntryBytes?: number;
+  /** Total cached bytes, default 512 MiB; an object that would exceed it is dropped (R6). */
+  maxTotalBytes?: number;
+  /** Extra path prefixes never cached or answered (licence, token, config). `/slt/` is always excluded (R2). */
+  controlPaths?: readonly string[];
+}
+
 export interface MabrRouteProxyOptions {
   /** Bound the cache so a stalled player cannot retain media forever. */
   maxEntries?: number;
@@ -67,6 +94,8 @@ export interface MabrRouteProxyOptions {
   scope?: string;
   /** Called for GET/HEAD requests except no-store and reload; callback errors are ignored. */
   onCacheEvent?: (event: RouteCacheEvent) => void;
+  /** Enable transparent-interception hardening (R2, R3, R4, R5, R6, R9, R10, R11). */
+  transparent?: TransparentPolicy;
 }
 
 /** Session hook, not exported from the package: rebase and rescope the cache. */
@@ -82,6 +111,13 @@ function contentType(url: string): string {
   return pathname.endsWith('.mpd') ? 'application/dash+xml' :
     pathname.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/mp4';
 }
+
+const MANIFEST_TYPE = /^(?:application\/dash\+xml|application\/vnd\.apple\.mpegurl|application\/x-mpegurl|audio\/mpegurl)$/i;
+const MEDIA_TYPE = /^(?:video\/|audio\/|application\/mp4$|application\/octet-stream$|text\/vtt$)/i;
+const MAX_TRUSTED_MANIFESTS = 16;
+
+function mediaType(type: string): string { return type.split(';')[0]!.trim(); }
+function isManifestType(type: string): boolean { return MANIFEST_TYPE.test(mediaType(type)); }
 
 function sameToi(left: bigint | number | string, right: bigint | number | string): boolean {
   return String(left) === String(right);
@@ -109,6 +145,14 @@ export class MabrRouteProxy {
   #misses = 0;
   #networkFetch: typeof globalThis.fetch = globalThis.fetch.bind(globalThis);
   #restore: (() => void) | undefined;
+  readonly #policy: TransparentPolicy | undefined;
+  readonly #controlPaths: readonly string[];
+  readonly #maxEntryBytes: number;
+  readonly #maxTotalBytes: number;
+  #scopeSet = true;
+  #totalBytes = 0;
+  /** Manifests the player loaded over unicast; they decide which in-scope URLs ROUTE may answer (R10). */
+  readonly #trusted = new Map<string, ManifestNames>();
 
   constructor(options: MabrRouteProxyOptions = {}) {
     this.#maxEntries = options.maxEntries ?? 256;
@@ -116,13 +160,64 @@ export class MabrRouteProxy {
     this.#baseUrl = options.baseUrl ?? globalThis.location?.href ?? 'http://localhost/';
     this.#scope = new URL('.', new URL(options.scope ?? this.#baseUrl, this.#baseUrl)).href;
     this.#onCacheEvent = options.onCacheEvent;
+    this.#policy = options.transparent;
+    this.#controlPaths = ['/slt/', ...(options.transparent?.controlPaths ?? [])];
+    this.#maxEntryBytes = options.transparent?.maxEntryBytes ?? 32 * 2 ** 20;
+    this.#maxTotalBytes = options.transparent?.maxTotalBytes ?? 512 * 2 ** 20;
+    if (this.#policy) {
+      // R3: until a trusted scope is set (explicit, or rescope() from the
+      // HTTPS SLT), nothing is cached, so nothing lands under the page or
+      // worker directory by default.
+      this.#scopeSet = options.scope !== undefined || options.baseUrl !== undefined;
+      if (this.#scopeSet) this.#assertSafeScope(this.#scope);
+    }
+  }
+
+  /** R2: never an origin root, never `/slt/`. */
+  #assertSafeScope(scope: string): void {
+    const path = new URL(scope).pathname;
+    if (path === '/' || path.startsWith('/slt/') || '/slt/'.startsWith(path)) {
+      throw new RangeError(`ROUTE cache scope ${scope} is an origin root or contains /slt/`);
+    }
+  }
+
+  #isControl(url: string): boolean {
+    const path = new URL(url).pathname;
+    return this.#controlPaths.some((prefix) => path.startsWith(prefix));
+  }
+
+  /** True when `url` is under the cache scope; lets an adapter skip requests ROUTE can never answer. */
+  inScope(url: string): boolean {
+    try { return new URL(url, this.#baseUrl).href.startsWith(this.#scope); } catch { return false; }
+  }
+
+  /**
+   * Record a manifest the player loaded over unicast as trusted (R8). Returns
+   * false, trusting nothing, when it is outside the scope or a control path.
+   */
+  trustManifest(url: string, body: ArrayBuffer | ArrayBufferView): boolean {
+    const href = new URL(url, this.#baseUrl).href;
+    if (!this.#scopeSet || !href.startsWith(this.#scope) || this.#isControl(href)) return false;
+    this.#trusted.delete(href);
+    this.#trusted.set(href, manifestNames(href, new TextDecoder().decode(bytes(body)), this.#scope));
+    while (this.#trusted.size > MAX_TRUSTED_MANIFESTS) this.#trusted.delete(this.#trusted.keys().next().value!);
+    return true;
   }
 
   /** Replace base and scope, dropping cached entries outside the new scope. */
   [rescope](baseUrl: string, scope: string): void {
+    const next = new URL('.', new URL(scope, baseUrl)).href;
+    if (this.#policy) this.#assertSafeScope(next);
     this.#baseUrl = baseUrl;
-    this.#scope = new URL('.', new URL(scope, baseUrl)).href;
-    for (const url of this.#entries.keys()) if (!url.startsWith(this.#scope)) this.#entries.delete(url);
+    this.#scope = next;
+    this.#scopeSet = true;
+    for (const [url, entry] of this.#entries) if (!url.startsWith(this.#scope)) this.#drop(url, entry);
+    for (const url of this.#trusted.keys()) if (!url.startsWith(this.#scope)) this.#trusted.delete(url);
+  }
+
+  #drop(url: string, entry: { body: ArrayBuffer }): void {
+    this.#entries.delete(url);
+    this.#totalBytes -= entry.body.byteLength;
   }
 
   /**
@@ -133,9 +228,25 @@ export class MabrRouteProxy {
   put(segment: RouteSegment): string | undefined {
     const url = new URL(segment.url, this.#baseUrl).href;
     if (!url.startsWith(this.#scope)) return undefined;
-    this.#entries.delete(url);
-    this.#entries.set(url, { body: bytes(segment.data), type: segment.contentType ?? contentType(url) });
-    while (this.#entries.size > this.#maxEntries) this.#entries.delete(this.#entries.keys().next().value!);
+    const body = bytes(segment.data);
+    const type = segment.contentType ?? contentType(url);
+    const existing = this.#entries.get(url);
+    if (this.#policy) {
+      if (!this.#scopeSet || this.#isControl(url)) return undefined;
+      // R5: first write wins; only a manifest may be refreshed (live), and it
+      // still has to pass R9 before it is ever served.
+      if (existing && !isManifestType(existing.type)) return url;
+      // R6: an object over the per-object or total byte budget is dropped.
+      const total = this.#totalBytes - (existing?.body.byteLength ?? 0) + body.byteLength;
+      if (body.byteLength > this.#maxEntryBytes || total > this.#maxTotalBytes) return undefined;
+    }
+    if (existing) this.#drop(url, existing);
+    this.#entries.set(url, { body, type });
+    this.#totalBytes += body.byteLength;
+    while (this.#entries.size > this.#maxEntries) {
+      const oldest = this.#entries.keys().next().value!;
+      this.#drop(oldest, this.#entries.get(oldest)!);
+    }
     return url;
   }
 
@@ -160,8 +271,13 @@ export class MabrRouteProxy {
     });
   }
 
-  delete(url: string): boolean { return this.#entries.delete(new URL(url, this.#baseUrl).href); }
-  clear(): void { this.#entries.clear(); }
+  delete(url: string): boolean {
+    const href = new URL(url, this.#baseUrl).href;
+    const entry = this.#entries.get(href);
+    if (entry) this.#drop(href, entry);
+    return entry !== undefined;
+  }
+  clear(): void { this.#entries.clear(); this.#totalBytes = 0; }
   get size(): number { return this.#entries.size; }
   get stats(): RouteCacheStats { return { hits: this.#hits, misses: this.#misses }; }
 
@@ -198,13 +314,32 @@ export class MabrRouteProxy {
     return (await this.#resolve(request)) ?? this.#networkFetch(request);
   }
 
+  /** R4, R9, R10, R11: may this cached object answer a player request? */
+  async #eligible(url: string, hit: { body: ArrayBuffer; type: string }): Promise<boolean> {
+    const policy = this.#policy!;
+    if (this.#isControl(url)) return false;
+    if (isManifestType(hit.type)) {
+      // R8/R9: the manifest comes over unicast; a multicast copy is served
+      // only if the DS authenticates it, and then it becomes trusted.
+      if (!policy.verifyManifest || !(await policy.verifyManifest(url, hit.body.slice(0)))) return false;
+      this.trustManifest(url, hit.body);
+      return true;
+    }
+    if (!MEDIA_TYPE.test(mediaType(hit.type))) return false;
+    // R11: no digest channel yet, so serving is an explicit per-DS-origin opt-in.
+    if (!policy.unauthenticatedSegments?.includes(new URL(url).origin)) return false;
+    for (const set of this.#trusted.values()) if (isNamed(url, set)) return true;
+    return false;
+  }
+
   async #resolve(request: Request): Promise<Response | undefined> {
     // A request that bypasses caches (DS discovery sends no-store) must not
     // be answered by objects that arrived on unauthenticated multicast.
     if ((request.method !== 'GET' && request.method !== 'HEAD') ||
         request.cache === 'no-store' || request.cache === 'reload') return undefined;
     const url = new URL(request.url, this.#baseUrl).href;
-    const hit = this.#entries.get(url);
+    let hit = this.#entries.get(url);
+    if (hit && this.#policy && !(await this.#eligible(url, hit))) hit = undefined;
     if (!hit) {
       this.#misses++;
       this.#report({ url, method: request.method, outcome: 'miss', transport: 'network' });
