@@ -182,8 +182,15 @@ export function installTransparentAdapter(target: AdapterTarget, options: Transp
     } catch { /* observation is best effort */ }
   }
 
+  // Missed XHRs still waiting to be observed. A player (hls.js, dash.js) consumes the response at
+  // readystatechange(4), before `load`, and issues segment requests from there; so any later
+  // send() or fetch() first learns from completed ones, whatever order handlers ran in.
+  const unobserved = new Map<XMLHttpRequest, () => void>();
+  const drainUnobserved = () => { for (const [x, learn] of unobserved) if (x.readyState === 4) learn(); };
+
   // ---- fetch ----
   const patchedFetch = async function(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+    drainUnobserved();
     let info: RequestInfoLite | undefined;
     try {
       // Read fields only; never construct a Request from `input`, which would
@@ -220,12 +227,9 @@ export function installTransparentAdapter(target: AdapterTarget, options: Transp
     const sendToken = new WeakMap<XMLHttpRequest, object>(); // identifies the current send; abort/open invalidate it so a stale lookup cannot act
     interface XhrMeta { method: string; url: string; async: boolean; headers: Array<[string, string]>; }
     const meta = new WeakMap<XMLHttpRequest, XhrMeta>();
-    // Missed XHRs still waiting to be observed. A player (hls.js) consumes the response at
-    // readystatechange(4), before `load`, and issues segment requests from there; so any
-    // later send() first learns from completed ones, whatever order handlers ran in.
-    const unobserved = new Map<XMLHttpRequest, () => void>();
     proto.open = function(this: XMLHttpRequest, method: string, url: string | URL, ...rest: unknown[]) {
       sendToken.delete(this);
+      unobserved.delete(this); // a reused XHR must not learn its previous response
       try {
         meta.set(this, { method: String(method).toUpperCase(), url: new URL(String(url), g.location.href).href, async: rest[0] !== false, headers: [] });
       } catch { meta.delete(this); }
@@ -247,7 +251,7 @@ export function installTransparentAdapter(target: AdapterTarget, options: Transp
       return abort.call(this);
     };
     proto.send = function(this: XMLHttpRequest, body?: Document | XMLHttpRequestBodyInit | null) {
-      for (const [x, learn] of unobserved) if (x.readyState === 4) learn();
+      drainUnobserved();
       const m = meta.get(this);
       const xhr = this;
       if (!m) return send.call(xhr, body);
