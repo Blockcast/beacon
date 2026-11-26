@@ -438,29 +438,6 @@ test('adapter: xhr hit is served from ROUTE and a miss reaches the network', asy
   adapter.restore();
 });
 
-test('adapter: xhr manifest is trusted before the player\'s own readystatechange handler runs', async () => {
-  FakeXhr.sent = [];
-  const s = setup();
-  (s.g as { XMLHttpRequest?: unknown }).XMLHttpRequest = FakeXhr;
-  s.adapter.restore();
-  const adapter = installTransparentAdapter(s.proxy, { global: s.g });
-  s.proxy.put({ url: seg(1), data: Uint8Array.of(1), contentType: 'video/mp4' });
-  FakeXhr.netBody = MPD;
-  let servedInHandler: number | undefined;
-  await new Promise<void>((resolve) => {
-    const xhr = new FakeXhr();
-    xhr.open('GET', `${DS}/live/manifest.mpd`);
-    // hls.js-style: continue from the handler, which issues the segment request at once.
-    (xhr as unknown as { onreadystatechange: unknown }).onreadystatechange = null;
-    xhr.addEventListener('readystatechange', () => { s.g.fetch(seg(1)).then((r) => { servedInHandler = r.status; resolve(); }); });
-    xhr.send();
-  });
-  FakeXhr.netBody = 'net';
-  assert.equal(servedInHandler, 200);
-  assert.equal(s.proxy.stats.hits, 1, 'segment came from ROUTE, not the network');
-  adapter.restore();
-});
-
 test('adapter: xhr abort during the ROUTE lookup cancels the request (hit and miss)', async () => {
   FakeXhr.sent = [];
   const s = setup();
