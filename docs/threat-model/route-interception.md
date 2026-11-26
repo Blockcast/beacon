@@ -106,8 +106,10 @@ What is **not** covered and becomes worse under transparent interception:
   `baseUrl`, so until `rescope` runs the scope is the page's directory
   (`proxy.ts` constructor, `route.ts:842`). On the SLS-derived path (SLT omits
   `PresentationManifest`), non-manifest SLS parts are `put()` before the scope
-  is established (`route.ts` `#ingestManifest`). In a page this is the page
-  directory; in an SW it would be the SW script's directory, which is very
+  is established (`route.ts` `#ingestManifest`). The general object path has
+  the same gap: `#ingest` `put()`s every FDT object with `integrity >= 100`
+  and a `contentLocation`, with no scope-established guard. In a page this is
+  the page directory; in an SW it would be the SW script's directory, which is very
   often the origin root.
 - **T1e. Cache eviction as a weapon.** `maxEntries` (default 256) is an
   insertion-order LRU with no per-entry or total byte budget. A1 can flood
@@ -229,8 +231,8 @@ with that name (or record the rename on BLO-59458), and the compat matrix
 |---|---|---|
 | R1 | The cache scope comes only from trusted sources: explicit config, or the HTTPS-fetched SLT `PresentationManifest`. A multicast-derived manifest location MUST NOT set or widen the scope under a transparent adapter. | `adapter: refuses to derive scope from an SLS-carried manifest location` |
 | R2 | The scope is never an origin root and never contains `/slt/` or any configured control path (licence, token, config). Configured control paths are excluded even when inside scope. | `adapter: control paths inside scope are never answered from ROUTE` |
-| R3 | No object is cached before the scope is established; nothing is stored under a default (page or worker) directory. | `adapter: drops objects received before scope is established` |
-| R4 | Only media is answered: manifests (`.mpd`, `.m3u8`) and media/init segments, by request `destination` (`''`/`video`/`audio`/fetch from the player) and by stored type. Script, style, document, image, worker and navigation requests always go to the network. | `adapter: non-media destinations always reach the network` |
+| R3 | No object is cached before the scope is established, on either store path (`#ingestManifest` SLS parts and `#ingest` FDT objects); nothing is stored under a default (page or worker) directory. The test injects one object through each path before scope is set. | `adapter: drops objects received before scope is established` |
+| R4 | Only media is answered. A request is eligible only if ALL hold: (a) `request.destination` is `''`, `video`, `audio` or `track`; (b) the URL is the trusted manifest URL (R1/R8) or a segment named by it (R10), and the stored type is a manifest or media/init segment; (c) the initiating client is a configured player page: SW — `clients.get(event.clientId).url` path-matches the configured player URL; extension — the request's tab/frame URL matches it; native proxy — `Origin` is the player origin (R16). Script, style, document, image, worker and navigation requests always go to the network. The adapter does NOT attempt to tell the player's `fetch` from another script's `fetch` inside the same player page (`destination` is `''` for both); see §6. | `adapter: non-media destinations always reach the network` |
 | R5 | First-write-wins per URL for the lifetime of an entry: once a URL has been served, a later object at the same location does not replace it (a new TOI for a live manifest is the one allowed update and must itself pass R9). | `adapter: a served segment is not replaced by a later injected object` |
 | R6 | Total byte budget and per-object byte cap in addition to `maxEntries`; over-budget objects are dropped, not cached. | `adapter: oversized and over-budget objects are dropped` |
 | R7 | `cache: no-store` and `reload` keep bypassing the cache through every mechanism (SW `event.request.cache`, extension, native proxy). | `adapter: no-store and reload bypass ROUTE` (+ `compat: discovery bypasses ROUTE`) |
@@ -258,9 +260,9 @@ with that name (or record the rename on BLO-59458), and the compat matrix
 
 | ID | Requirement | Test |
 |---|---|---|
-| R17 | A request is answered from ROUTE only if the network would have given the page a readable response: same-origin, or `cors` mode to a DS origin on the per-player allowlist with a recorded successful CORS response for that initiator. `no-cors` requests to another origin are never answered from ROUTE. | `adapter: cross-origin no-cors and non-allowlisted cors requests reach the network` |
+| R17 | A request is answered from ROUTE only if the network would have given the page a readable response: same-origin, or `cors` mode to a DS origin on the per-player allowlist with a recorded successful CORS response for that initiator. The record is keyed (DS origin, initiator origin) and set only by the adapter's own unicast fall-through for that pair: SW/extension — the forwarded fetch resolved with `response.type === 'cors'`; native proxy — the upstream response carried `Access-Control-Allow-Origin` equal to the request `Origin` (or `*` for non-credentialed requests). No record means the request goes to the network. `no-cors` requests to another origin are never answered from ROUTE. | `adapter: cross-origin no-cors and non-allowlisted cors requests reach the network` |
 | R18 | Entitlement-gated DS paths (configured) are never answered from ROUTE; requests carrying credentials (`credentials: include` with cookies, `Authorization`) to non-public paths fall through. | `adapter: credentialed requests to gated paths reach the network` |
-| R19 | The cache is partitioned by top-level site of the initiating client; a hit in one site's partition is a miss in another's. | `adapter: cache is partitioned by top-level site` |
+| R19 | The cache is partitioned per top-level site; a hit in one partition is a miss in another's. Partition key by mechanism: SW — the registration's own storage (browsers key SW + Cache Storage by top-level site under storage partitioning); entries MUST NOT be shared through any channel outside that partition (extension messaging, native helper). Extension — top-level origin of the requesting tab (`tabs.get(tabId).url`); if it is unreadable (not a granted host, R14) the request is not answered from ROUTE. Native proxy — request `Origin` (top-level site is not observable; see §6). | `adapter: cache is partitioned by top-level site` |
 | R20 | Miss fall-through forwards the original request unchanged (mode, credentials, referrer policy, headers, integrity attribute). | `adapter: miss forwards the original request unchanged` |
 | R21 | Telemetry (`onCacheEvent`) is delivered only to the player that owns the session, not to other controlled pages or origins. | `adapter: cache events are not delivered to other clients` |
 
@@ -292,6 +294,12 @@ Run in every claimed player × browser × format cell:
   this to denial of playback. The README must say this plainly.
 - **Cost downgrade** (T5a): A2 can always force unicast. Detected (R23), not
   prevented.
+- **Same-document scripts** (R4): any script running in the player page can
+  `fetch` an eligible media URL and receive the ROUTE copy. Such a script
+  could fetch the same URL from the network anyway; the exposure is only that
+  it reads unauthenticated (T6b) bytes, which the player itself already does.
+- **Native proxy partitioning** (R19): keyed by `Origin`, not top-level site,
+  so a player origin embedded under two sites shares one partition.
 - **Decoder attack surface**: malformed MP4 reaching MSE. Not mitigable in
   the adapter beyond R10/R11; relies on browser hardening.
 
