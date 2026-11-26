@@ -220,12 +220,34 @@ export function installTransparentAdapter(target: AdapterTarget, options: Transp
     const sendToken = new WeakMap<XMLHttpRequest, object>(); // identifies the current send; abort/open invalidate it so a stale lookup cannot act
     interface XhrMeta { method: string; url: string; async: boolean; headers: Array<[string, string]>; }
     const meta = new WeakMap<XMLHttpRequest, XhrMeta>();
-    // Missed XHRs still waiting to be observed. A player (hls.js) consumes the response at
-    // readystatechange(4), before `load`, and issues segment requests from there; so any
-    // later send() first learns from completed ones, whatever order handlers ran in.
-    const unobserved = new Map<XMLHttpRequest, () => void>();
+    // Observation must run before the player's own handlers: hls.js continues from
+    // onreadystatechange and would request the segments the manifest names before a
+    // listener added at send() could trust it. open() precedes any handler a player
+    // attaches after it, so the hook is registered there, once per XHR.
+    const observeOnDone = new WeakMap<XMLHttpRequest, RequestInfoLite>();
+    const hooked = new WeakSet<XMLHttpRequest>();
+    const onDone = function(this: XMLHttpRequest) {
+      if (this.readyState !== 4) return;
+      const info = observeOnDone.get(this);
+      if (!info) return;
+      observeOnDone.delete(this);
+      try {
+        if (this.status < 200 || this.status >= 300) return;
+        const body = this.responseType === 'arraybuffer' && this.response instanceof ArrayBuffer
+          ? this.response
+          : this.responseType === 'text' || this.responseType === ''
+            ? new TextEncoder().encode(String(this.response ?? '')).buffer
+            : undefined;
+        observe(info, new Response(body ?? null, {
+          status: 200,
+          headers: { 'content-type': this.getResponseHeader('content-type') ?? '' },
+        }), 'xhr', body);
+      } catch { /* best effort */ }
+    };
     proto.open = function(this: XMLHttpRequest, method: string, url: string | URL, ...rest: unknown[]) {
       sendToken.delete(this);
+      observeOnDone.delete(this);
+      if (!hooked.has(this)) { hooked.add(this); this.addEventListener('readystatechange', onDone); }
       try {
         meta.set(this, { method: String(method).toUpperCase(), url: new URL(String(url), g.location.href).href, async: rest[0] !== false, headers: [] });
       } catch { meta.delete(this); }
@@ -247,7 +269,6 @@ export function installTransparentAdapter(target: AdapterTarget, options: Transp
       return abort.call(this);
     };
     proto.send = function(this: XMLHttpRequest, body?: Document | XMLHttpRequestBodyInit | null) {
-      for (const [x, learn] of unobserved) if (x.readyState === 4) learn();
       const m = meta.get(this);
       const xhr = this;
       if (!m) return send.call(xhr, body);
@@ -289,26 +310,8 @@ export function installTransparentAdapter(target: AdapterTarget, options: Transp
       }).then((served) => {
         if (served || cancelled()) return;
         pending.delete(xhr);
-        // Miss: send the original request. Observe a manifest/CORS grant on completion.
-        const learn = () => {
-          unobserved.delete(xhr);
-          xhr.removeEventListener('load', learn);
-          try {
-            if (xhr.status < 200 || xhr.status >= 300) return;
-            const body = xhr.responseType === 'arraybuffer' && xhr.response instanceof ArrayBuffer
-              ? xhr.response
-              : xhr.responseType === 'text' || xhr.responseType === ''
-                ? new TextEncoder().encode(String(xhr.response ?? '')).buffer
-                : undefined;
-            observe(info, new Response(body ?? null, {
-              status: 200,
-              headers: { 'content-type': xhr.getResponseHeader('content-type') ?? '' },
-            }), 'xhr', body);
-          } catch { /* best effort */ }
-        };
-        unobserved.set(xhr, learn);
-        xhr.addEventListener('load', learn);
-        xhr.addEventListener('loadend', () => unobserved.delete(xhr), { once: true });
+        // Miss: send the original request; the readystatechange hook installed at open() observes a manifest/CORS grant on completion.
+        observeOnDone.set(xhr, info);
         flush();
       }, () => { counts.errors++; if (cancelled()) return; pending.delete(xhr); flush(); });
     } as unknown as typeof proto.send;
