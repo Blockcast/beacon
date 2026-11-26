@@ -7,11 +7,16 @@ export type {
   RoutePayload,
   RouteCacheEvent,
   RouteCacheStats,
+  RouteDropReason,
   RouteSegment,
   TransparentPolicy,
 } from './proxy.ts';
 export { installTransparentAdapter } from './adapter.ts';
 export type { AdapterStatus, TransparentAdapter, TransparentAdapterOptions, AdapterTarget } from './adapter.ts';
+
+export { contentTypeFor, normalizeKey, respond } from './respond.ts';
+export type { RouteReply } from './respond.ts';
+
 
 export { RouteMabrSession, RouteRaptorQCollector, createRouteMabrSession, discoverSlsEndpoint } from './route.ts';
 export type {
@@ -59,3 +64,6 @@ export type {
   ShakaRouteHealthAdapterOptions,
   ShakaRoutePlayer,
 } from './route-health.ts';
+
+export { createMulticastReceiverGateway, createRouteGateway } from './gateway.ts';
+export type { RouteProvider } from './gateway.ts';

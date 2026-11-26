@@ -287,3 +287,65 @@ each have the test named in the threat model. Not built, so their tests are
 (local native proxy). R14 is checked against `extension/manifest.json`, the
 permission contract for the future extension packaging; there is no extension
 loader yet.
+
+## Choosing the packet source
+
+`createRouteGateway()` takes each ROUTE leg from the user agent's own
+`MulticastReceiver` where the browser has one, and from `window.multicast`
+otherwise. Pass it as the session's `gateway`:
+
+```ts
+import { createRouteGateway, createRouteMabrSession } from '@blockcast/mabr-route-proxy';
+const gateway = createRouteGateway(); // reads MulticastReceiver and window.multicast from globalThis
+const session = createRouteMabrSession({ gateway, wasm: routeWasm, ingress: 'native', sltUrl: 'https://live.example' });
+```
+
+Each `subscribe(config)` is routed by its config:
+
+| config | packets come from |
+| --- | --- |
+| `origin: 'ip-multicast'` (or no `origin`), or `origin: 'amt'` with `discovery` in place of a `relay`; each with a `source` | `MulticastReceiver`, where the page has one |
+| the same, when the `MulticastReceiver` constructor throws, `opened` rejects, or the receiver opens without a `readable` or a `closed` that can be read | `window.multicast`, subscribed once |
+| any other config, for example an explicit `relay`, `origin: 'tuner'`, no `source` or a `consume` other than `'bytes'`; and every config on a page without `MulticastReceiver` | `window.multicast` |
+
+Where there is no `window.multicast` to subscribe through, `subscribe()`
+rejects with an `Error` that has a `code`:
+
+| what happened | `code` | `cause` |
+| --- | --- | --- |
+| the page has no `MulticastReceiver` either | `'capability-unsupported'` | none |
+| `config` is not an object, or has no `consume` | `'subscription-failed'` | none |
+| another config that `MulticastReceiver` does not serve | `'capability-unsupported'` | none |
+| the `MulticastReceiver` constructor throws | `'capability-unsupported'` | what it threw |
+| `opened` rejects, or the receiver opens without a `readable` or a `closed` that can be read | `'subscription-failed'` | the rejection, or what was thrown |
+
+For a config it serves, the adapter constructs
+`new MulticastReceiver({ groupAddress, sourceAddress, localPort })` from the
+config's `group`, `source` and `port`, awaits `opened`, reads `readable` and
+dispatches one `bytes` event per datagram. `unsubscribe()` cancels the read and
+calls `close()`. The subscription's read-only `provider` is `'user-agent'` or
+`'window.multicast'`, whichever side served it. The adapter passes only
+`group`, `source` and `port` to `MulticastReceiver`; `relay` and `discovery`
+reach only `window.multicast`. `createMulticastReceiverGateway()` is the
+receiver side alone, and returns `undefined` where the page has no
+`MulticastReceiver`.
+
+If `closed` settles and `unsubscribe()` was not called, the subscription
+dispatches one `error` event; it keeps the event for the first `error`
+listener if none has been added yet. The event's `detail` is an `Error` with
+`code` `'subscription-failed'` and, as its `cause`, the `reason` that `closed`
+resolved to, or the rejection of `closed`. The adapter does not subscribe
+again, and `RouteMabrSession` does not listen for the event: that leg delivers
+nothing more until the session is stopped and started again.
+
+`subscribe()` settles only after `opened` has, and `RouteMabrSession` joins
+its legs one after another, so the time each open takes adds up from leg to
+leg, whichever side then serves it; `start()` resolves after the legs it
+joins itself.
+
+The session's default `ingress: 'tuner'` always goes to `window.multicast`;
+set `ingress: 'native'`, or `'amt'` without a `relay`, to have
+`MulticastReceiver` tried first. Under `ingress: 'native'` a rendition leg
+whose S-TSID entry names no source is joined without one, so it goes to
+`window.multicast`; `ingress: 'amt'` without a `relay` gives such a leg the
+SLS source.

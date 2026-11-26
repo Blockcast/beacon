@@ -5,6 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  BRIDGE_PROTOCOL_VERSION,
   BridgeClient,
   multicastBridgeTransportOptionsFromConfig,
   subscribeMulticastBridgeBytes,
@@ -46,11 +47,11 @@ test("a frequency-only atsc3 config carries frequency alone, including PLP 0 whe
   assert.equal(subscribeMessage({ ...ATSC3, frequency: 177000, plpId: 0 }).plp_id, 0);
 });
 
-test("an ip-multicast subscribe frame is byte-identical to the pre-tuning one", () => {
+test("an ip-multicast subscribe frame is the pre-tuning one plus the R1 version stamp", () => {
   const msg = subscribeMessage({ group: "232.1.1.50", port: 8000, source: "69.25.95.128", consume: "bytes", origin: "ip-multicast", protocol: "mmtp", fec: true });
   assert.equal(
     JSON.stringify(msg),
-    '{"type":"subscribe","request_id":"req-1","client_type":"bridge","page_url":"https://example.test/player.html",' +
+    '{"type":"subscribe","request_id":"req-1","client_type":"bridge","bridge_protocol_version":1,"page_url":"https://example.test/player.html",' +
       '"group":"232.1.1.50","port":8000,"source":"69.25.95.128","protocol":"mmtp","origin":"ip-multicast","fec":true,"mode":"native"}',
   );
 });
@@ -68,4 +69,15 @@ test("one group on two channels does not share a receiver", async () => {
   await subscribeMulticastBridgeBytes(bridgeClient, { ...ATSC3, frequency: 599000 });
   await subscribeMulticastBridgeBytes(bridgeClient, { ...ATSC3, frequency: 599000 });
   assert.deepEqual(calls.map((o) => o.frequency), [593000, 599000]);
+});
+
+test("ROOT-01 R1: every subscribe carries bridge_protocol_version 1", () => {
+  for (const config of [
+    { group: "232.1.1.50", port: 8000, origin: "ip-multicast", protocol: "mmtp" },
+    { ...ATSC3, frequency: 593000 },
+    { group: "232.1.1.50", port: 8000, origin: "amt", protocol: "mmtp" },
+  ]) {
+    assert.strictEqual(subscribeMessage(config).bridge_protocol_version, 1);
+  }
+  assert.strictEqual(BRIDGE_PROTOCOL_VERSION, 1);
 });

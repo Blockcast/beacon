@@ -5,6 +5,7 @@
  */
 
 import { isNamed, manifestNames, type ManifestNames } from './manifest-names.ts';
+import { contentTypeFor, normalizeKey, respond } from './respond.ts';
 
 export interface RoutePayload {
   /** ROUTE TOI as emitted by the existing parser (preserve uint64 as bigint/string). */
@@ -39,13 +40,24 @@ export interface RouteSegment {
 export interface RouteCacheEvent {
   url: string;
   method: 'GET' | 'HEAD';
-  outcome: 'hit' | 'miss';
+  /** `late-hit`: the object completed inside the bounded `lookupWaitMs`. */
+  outcome: 'hit' | 'miss' | 'late-hit';
   transport: 'route' | 'network';
+  /** HTTP status served (route hits only; network responses are the origin's). */
+  status?: number;
+  range?: string;
+  reason?: 'no-entry';
 }
+
+export type RouteDropReason = 'out-of-scope' | 'integrity' | 'no-location' | 'over-budget' | 'evicted';
 
 export interface RouteCacheStats {
   hits: number;
   misses: number;
+  lateHits: number;
+  entries: number;
+  bytes: number;
+  drops: Record<RouteDropReason, number>;
 }
 
 /** The bytes-only subset of the frozen `window.multicast` Subscription surface. */
@@ -82,6 +94,14 @@ export interface TransparentPolicy {
 export interface MabrRouteProxyOptions {
   /** Bound the cache so a stalled player cannot retain media forever. */
   maxEntries?: number;
+  /** Total cached bytes (default 128 MiB) and per-object cap (default 64 MiB). */
+  maxBytes?: number;
+  maxObjectBytes?: number;
+  /**
+   * Bounded wait (default 0, max 250) for an object that is mid-assembly
+   * before a miss falls through to the network.
+   */
+  lookupWaitMs?: number;
   /**
    * Base for relative Content-Location and request URLs. The sender labels
    * objects with DS-root paths, so for DS URLs this is the DS origin root.
@@ -106,11 +126,6 @@ function bytes(data: ArrayBuffer | ArrayBufferView): ArrayBuffer {
   return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
 }
 
-function contentType(url: string): string {
-  const pathname = new URL(url).pathname.toLowerCase();
-  return pathname.endsWith('.mpd') ? 'application/dash+xml' :
-    pathname.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/mp4';
-}
 
 const MANIFEST_TYPE = /^(?:application\/dash\+xml|application\/vnd\.apple\.mpegurl|application\/x-mpegurl|audio\/mpegurl)$/i;
 const MEDIA_TYPE = /^(?:video\/|audio\/|application\/mp4$|application\/octet-stream$|text\/vtt$)/i;
@@ -141,8 +156,15 @@ export class MabrRouteProxy {
   #scope: string;
   readonly #entries = new Map<string, { body: ArrayBuffer; type: string }>();
   readonly #onCacheEvent: ((event: RouteCacheEvent) => void) | undefined;
+  readonly #maxBytes: number;
+  readonly #maxObjectBytes: number;
+  readonly #lookupWaitMs: number;
+  readonly #waiters = new Map<string, Set<() => void>>();
+  #bytes = 0;
   #hits = 0;
   #misses = 0;
+  #lateHits = 0;
+  readonly #drops: Record<RouteDropReason, number> = { 'out-of-scope': 0, integrity: 0, 'no-location': 0, 'over-budget': 0, evicted: 0 };
   #networkFetch: typeof globalThis.fetch = globalThis.fetch.bind(globalThis);
   #restore: (() => void) | undefined;
   readonly #policy: TransparentPolicy | undefined;
@@ -150,13 +172,17 @@ export class MabrRouteProxy {
   readonly #maxEntryBytes: number;
   readonly #maxTotalBytes: number;
   #scopeSet = true;
-  #totalBytes = 0;
   /** Manifests the player loaded over unicast; they decide which in-scope URLs ROUTE may answer (R10). */
   readonly #trusted = new Map<string, ManifestNames>();
 
   constructor(options: MabrRouteProxyOptions = {}) {
     this.#maxEntries = options.maxEntries ?? 256;
     if (!Number.isInteger(this.#maxEntries) || this.#maxEntries < 1) throw new RangeError('maxEntries must be positive');
+    this.#maxBytes = options.maxBytes ?? 128 * 1024 * 1024;
+    this.#maxObjectBytes = options.maxObjectBytes ?? 64 * 1024 * 1024;
+    this.#lookupWaitMs = options.lookupWaitMs ?? 0;
+    if (!(this.#maxBytes > 0) || !(this.#maxObjectBytes > 0)) throw new RangeError('maxBytes and maxObjectBytes must be positive');
+    if (!(this.#lookupWaitMs >= 0 && this.#lookupWaitMs <= 250)) throw new RangeError('lookupWaitMs must be 0..250');
     this.#baseUrl = options.baseUrl ?? globalThis.location?.href ?? 'http://localhost/';
     this.#scope = new URL('.', new URL(options.scope ?? this.#baseUrl, this.#baseUrl)).href;
     this.#onCacheEvent = options.onCacheEvent;
@@ -211,14 +237,19 @@ export class MabrRouteProxy {
     this.#baseUrl = baseUrl;
     this.#scope = next;
     this.#scopeSet = true;
-    for (const [url, entry] of this.#entries) if (!url.startsWith(this.#scope)) this.#drop(url, entry);
+    for (const url of [...this.#entries.keys()]) if (!url.startsWith(this.#scope)) this.#remove(url);
     for (const url of this.#trusted.keys()) if (!url.startsWith(this.#scope)) this.#trusted.delete(url);
   }
 
-  #drop(url: string, entry: { body: ArrayBuffer }): void {
-    this.#entries.delete(url);
-    this.#totalBytes -= entry.body.byteLength;
+  #remove(url: string): boolean {
+    const old = this.#entries.get(url);
+    if (!old) return false;
+    this.#bytes -= old.body.byteLength;
+    return this.#entries.delete(url);
   }
+
+  /** Count an object the ROUTE layer refused to cache (e.g. incomplete or unlabelled). */
+  noteDrop(reason: RouteDropReason): void { this.#drops[reason]++; }
 
   /**
    * Cache bytes at `segment.url`. Returns undefined, caching nothing, when the
@@ -226,10 +257,9 @@ export class MabrRouteProxy {
    * unauthenticated multicast/AMT, and installFetch() answers every page GET.
    */
   put(segment: RouteSegment): string | undefined {
-    const url = new URL(segment.url, this.#baseUrl).href;
-    if (!url.startsWith(this.#scope)) return undefined;
-    const body = bytes(segment.data);
-    const type = segment.contentType ?? contentType(url);
+    const url = normalizeKey(segment.url, this.#baseUrl);
+    if (!url.startsWith(this.#scope)) { this.#drops['out-of-scope']++; return undefined; }
+    const size = segment.data.byteLength;
     const existing = this.#entries.get(url);
     if (this.#policy) {
       if (!this.#scopeSet || this.#isControl(url)) return undefined;
@@ -237,16 +267,18 @@ export class MabrRouteProxy {
       // still has to pass R9 before it is ever served.
       if (existing && !isManifestType(existing.type)) return url;
       // R6: an object over the per-object or total byte budget is dropped.
-      const total = this.#totalBytes - (existing?.body.byteLength ?? 0) + body.byteLength;
-      if (body.byteLength > this.#maxEntryBytes || total > this.#maxTotalBytes) return undefined;
+      const total = this.#bytes - (existing?.body.byteLength ?? 0) + size;
+      if (size > this.#maxEntryBytes || total > this.#maxTotalBytes) { this.#drops['over-budget']++; return undefined; }
     }
-    if (existing) this.#drop(url, existing);
-    this.#entries.set(url, { body, type });
-    this.#totalBytes += body.byteLength;
-    while (this.#entries.size > this.#maxEntries) {
-      const oldest = this.#entries.keys().next().value!;
-      this.#drop(oldest, this.#entries.get(oldest)!);
+    if (size > this.#maxObjectBytes || size > this.#maxBytes) { this.#remove(url); this.#drops['over-budget']++; return undefined; }
+    this.#remove(url);
+    this.#entries.set(url, { body: bytes(segment.data), type: segment.contentType || contentTypeFor(url) });
+    this.#bytes += size;
+    while (this.#entries.size > this.#maxEntries || this.#bytes > this.#maxBytes) {
+      this.#remove(this.#entries.keys().next().value!);
+      this.#drops.evicted++;
     }
+    for (const wake of this.#waiters.get(url) ?? []) wake();
     return url;
   }
 
@@ -271,15 +303,29 @@ export class MabrRouteProxy {
     });
   }
 
-  delete(url: string): boolean {
-    const href = new URL(url, this.#baseUrl).href;
-    const entry = this.#entries.get(href);
-    if (entry) this.#drop(href, entry);
-    return entry !== undefined;
-  }
-  clear(): void { this.#entries.clear(); this.#totalBytes = 0; }
+  delete(url: string): boolean { return this.#remove(normalizeKey(url, this.#baseUrl)); }
+  clear(): void { this.#entries.clear(); this.#bytes = 0; }
   get size(): number { return this.#entries.size; }
-  get stats(): RouteCacheStats { return { hits: this.#hits, misses: this.#misses }; }
+  get stats(): RouteCacheStats {
+    return { hits: this.#hits, misses: this.#misses, lateHits: this.#lateHits, entries: this.#entries.size, bytes: this.#bytes, drops: { ...this.#drops } };
+  }
+
+  /** Resolve true if `url` is put within the bound, else false. */
+  #waitFor(url: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      const set = this.#waiters.get(url) ?? new Set<() => void>();
+      this.#waiters.set(url, set);
+      const done = (ok: boolean) => {
+        clearTimeout(timer);
+        set.delete(wake);
+        if (!set.size) this.#waiters.delete(url);
+        resolve(ok);
+      };
+      const wake = () => done(true);
+      const timer = setTimeout(() => done(false), this.#lookupWaitMs);
+      set.add(wake);
+    });
+  }
 
   #report(event: RouteCacheEvent): void {
     try {
@@ -337,52 +383,26 @@ export class MabrRouteProxy {
     // be answered by objects that arrived on unauthenticated multicast.
     if ((request.method !== 'GET' && request.method !== 'HEAD') ||
         request.cache === 'no-store' || request.cache === 'reload') return undefined;
-    const url = new URL(request.url, this.#baseUrl).href;
+    const url = normalizeKey(request.url, this.#baseUrl);
+    const method = request.method as 'GET' | 'HEAD';
+    const range = request.headers.get('range') ?? undefined;
     let hit = this.#entries.get(url);
+    let late = false;
+    // Only wait for URLs we would actually answer, so out-of-scope requests never stall.
+    if (!hit && this.#lookupWaitMs > 0 && url.startsWith(this.#scope) && await this.#waitFor(url)) {
+      hit = this.#entries.get(url);
+      late = hit !== undefined;
+    }
     if (hit && this.#policy && !(await this.#eligible(url, hit))) hit = undefined;
     if (!hit) {
       this.#misses++;
-      this.#report({ url, method: request.method, outcome: 'miss', transport: 'network' });
+      this.#report({ url, method, outcome: 'miss', transport: 'network', reason: 'no-entry', ...(range ? { range } : {}) });
       return undefined;
     }
-    this.#hits++;
-    this.#report({ url, method: request.method, outcome: 'hit', transport: 'route' });
-    const headers = new Headers({
-      'content-type': hit.type,
-      'cache-control': 'no-store',
-      'accept-ranges': 'bytes',
-      'content-length': String(hit.body.byteLength),
-    });
-    const range = request.headers.get('range');
-    if (!range) return new Response(request.method === 'HEAD' ? null : hit.body.slice(0), { status: 200, headers });
-    const match = /^bytes=(\d*)-(\d*)$/.exec(range);
-    if (!match || (match[1] === '' && match[2] === '')) {
-      headers.set('content-range', `bytes */${hit.body.byteLength}`);
-      return new Response(null, { status: 416, headers });
-    }
-    let start: number;
-    let end: number;
-    if (match[1] === '') {
-      const suffix = Number(match[2]);
-      if (!Number.isSafeInteger(suffix) || suffix <= 0) {
-        headers.set('content-range', `bytes */${hit.body.byteLength}`);
-        return new Response(null, { status: 416, headers });
-      }
-      start = Math.max(0, hit.body.byteLength - suffix);
-      end = hit.body.byteLength - 1;
-    } else {
-      start = Number(match[1]);
-      end = match[2] === '' ? hit.body.byteLength - 1 : Number(match[2]);
-      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || start > end || start >= hit.body.byteLength) {
-        headers.set('content-range', `bytes */${hit.body.byteLength}`);
-        return new Response(null, { status: 416, headers });
-      }
-      end = Math.min(end, hit.body.byteLength - 1);
-    }
-    const body = hit.body.slice(start, end + 1);
-    headers.set('content-range', `bytes ${start}-${end}/${hit.body.byteLength}`);
-    headers.set('content-length', String(body.byteLength));
-    return new Response(request.method === 'HEAD' ? null : body, { status: 206, headers });
+    const reply = respond(hit, { method, range, ifRange: request.headers.get('if-range') });
+    if (late) this.#lateHits++; else this.#hits++;
+    this.#report({ url, method, outcome: late ? 'late-hit' : 'hit', transport: 'route', status: reply.status, ...(range ? { range } : {}) });
+    return new Response(reply.body, { status: reply.status, headers: reply.headers });
   }
 
   /** Patch page fetch; returns an idempotent restore function. */
