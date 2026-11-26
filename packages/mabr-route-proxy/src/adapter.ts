@@ -220,6 +220,10 @@ export function installTransparentAdapter(target: AdapterTarget, options: Transp
     const sendToken = new WeakMap<XMLHttpRequest, object>(); // identifies the current send; abort/open invalidate it so a stale lookup cannot act
     interface XhrMeta { method: string; url: string; async: boolean; headers: Array<[string, string]>; }
     const meta = new WeakMap<XMLHttpRequest, XhrMeta>();
+    // Missed XHRs still waiting to be observed. A player (hls.js) consumes the response at
+    // readystatechange(4), before `load`, and issues segment requests from there; so any
+    // later send() first learns from completed ones, whatever order handlers ran in.
+    const unobserved = new Map<XMLHttpRequest, () => void>();
     proto.open = function(this: XMLHttpRequest, method: string, url: string | URL, ...rest: unknown[]) {
       sendToken.delete(this);
       try {
@@ -243,6 +247,7 @@ export function installTransparentAdapter(target: AdapterTarget, options: Transp
       return abort.call(this);
     };
     proto.send = function(this: XMLHttpRequest, body?: Document | XMLHttpRequestBodyInit | null) {
+      for (const [x, learn] of unobserved) if (x.readyState === 4) learn();
       const m = meta.get(this);
       const xhr = this;
       if (!m) return send.call(xhr, body);
@@ -285,7 +290,9 @@ export function installTransparentAdapter(target: AdapterTarget, options: Transp
         if (served || cancelled()) return;
         pending.delete(xhr);
         // Miss: send the original request. Observe a manifest/CORS grant on completion.
-        xhr.addEventListener('load', () => {
+        const learn = () => {
+          unobserved.delete(xhr);
+          xhr.removeEventListener('load', learn);
           try {
             if (xhr.status < 200 || xhr.status >= 300) return;
             const body = xhr.responseType === 'arraybuffer' && xhr.response instanceof ArrayBuffer
@@ -298,7 +305,10 @@ export function installTransparentAdapter(target: AdapterTarget, options: Transp
               headers: { 'content-type': xhr.getResponseHeader('content-type') ?? '' },
             }), 'xhr', body);
           } catch { /* best effort */ }
-        }, { once: true });
+        };
+        unobserved.set(xhr, learn);
+        xhr.addEventListener('load', learn);
+        xhr.addEventListener('loadend', () => unobserved.delete(xhr), { once: true });
         flush();
       }, () => { counts.errors++; if (cancelled()) return; pending.delete(xhr); flush(); });
     } as unknown as typeof proto.send;
