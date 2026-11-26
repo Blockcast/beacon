@@ -58,6 +58,14 @@ const files = new Map([
 ]);
 const hlsMaster = Buffer.from('#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-STREAM-INF:BANDWIDTH=1000000\nmedia.m3u8\n');
 const dataByLocation = new Map([...files].map(([location, path]) => [location, path ? readFileSync(path) : hlsMaster]));
+// Init segments are the ones the manifests declare (DASH initialization=, HLS
+// #EXT-X-MAP), not whatever is called init.mp4. Needs `npm run build` first.
+const { isInit, manifestNames } = await import('../dist/manifest-names.js');
+const E2E_ORIGIN = 'http://e2e.invalid/';
+const initLocations = [...dataByLocation].filter(([location]) => /\.(mpd|m3u8)$/.test(location)).flatMap(([location, data]) => {
+  const names = manifestNames(E2E_ORIGIN + location, data.toString('utf8'), E2E_ORIGIN);
+  return [...dataByLocation.keys()].filter((candidate) => isInit(E2E_ORIGIN + candidate, names));
+});
 const encoded = Object.fromEntries([...dataByLocation].map(([location, data]) => [location, data.toString('base64')]));
 const fixtureEnv = {
   ...process.env,
@@ -83,6 +91,7 @@ const createPage = (shakaSource) => `<!doctype html><meta charset=utf-8><video i
 <script>
 if (!Map.prototype.getOrInsertComputed) Map.prototype.getOrInsertComputed = function (key, factory) { if (!this.has(key)) this.set(key, factory(key)); return this.get(key); };
 window.__assets = ${JSON.stringify(encoded)};
+window.__initLocations = ${JSON.stringify(initLocations)};
 window.__sls = ${JSON.stringify(slsFixture.body)};
 window.__fixture = ${JSON.stringify(slsFixture)};
 window.__shaka = ${JSON.stringify(shakaSource)};
@@ -242,7 +251,7 @@ if (!subscriptions.some(({ config }) => config.group === fixture.mediaGroup)) {
 window.__gatewayConfigs = subscriptions.map(({ config }) => config);
 for (const [location, base64] of Object.entries(assets)) {
   if (location === 'hls/hls11.m4s' && !transparent) continue;
-  sendObject(fixture.mediaGroup, Object.keys(assets).indexOf(location) + 1, location.endsWith('.mpd') || location.endsWith('.m3u8') ? 3 : location.endsWith('init.mp4') ? 5 : 8, Uint8Array.from(atob(base64), (value) => value.charCodeAt(0)));
+  sendObject(fixture.mediaGroup, Object.keys(assets).indexOf(location) + 1, location.endsWith('.mpd') || location.endsWith('.m3u8') ? 3 : window.__initLocations.includes(location) ? 5 : 8, Uint8Array.from(atob(base64), (value) => value.charCodeAt(0)));
 }
 
 // The HLS segment is outside the derived pass's /dash/ scope.

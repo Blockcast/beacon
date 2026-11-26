@@ -14,6 +14,8 @@
 export interface ManifestNames {
   exact: Set<string>;
   patterns: RegExp[];
+  /** Subset of the above the manifest declares as initialization segments (DASH `initialization=`, HLS `#EXT-X-MAP`). */
+  init: { exact: Set<string>; patterns: RegExp[] };
 }
 
 const KEY_TAGS = /^#EXT-X-(?:SESSION-)?KEY\b/;
@@ -39,15 +41,15 @@ function resolve(value: string, base: string): string | undefined {
 }
 
 export function manifestNames(url: string, body: string, scope: string): ManifestNames {
-  const names: ManifestNames = { exact: new Set(), patterns: [] };
-  const add = (value: string, base: string) => {
+  const names: ManifestNames = { exact: new Set(), patterns: [], init: { exact: new Set(), patterns: [] } };
+  const add = (value: string, base: string, init = false) => {
     const href = resolve(value, base);
     // R24: nothing outside the cache scope is ever named, so a manifest that
     // points segments at another origin cannot make ROUTE answer for it.
     if (!href || !href.startsWith(scope)) return;
     const pattern = templatePattern(href);
-    if (pattern) names.patterns.push(pattern);
-    else names.exact.add(href);
+    if (pattern) { names.patterns.push(pattern); if (init) names.init.patterns.push(pattern); }
+    else { names.exact.add(href); if (init) names.init.exact.add(href); }
   };
   if (/^\s*#EXTM3U/.test(body) || /\.m3u8(?:[?#]|$)/i.test(url)) {
     for (const raw of body.split(/\r?\n/)) {
@@ -55,7 +57,8 @@ export function manifestNames(url: string, body: string, scope: string): Manifes
       if (!line) continue;
       if (!line.startsWith('#')) { add(line, url); continue; }
       if (KEY_TAGS.test(line)) continue; // key URIs are control-plane, never ROUTE
-      for (const match of line.matchAll(/URI="([^"]*)"/g)) add(match[1]!, url);
+      const map = line.startsWith('#EXT-X-MAP');
+      for (const match of line.matchAll(/URI="([^"]*)"/g)) add(match[1]!, url, map);
     }
     return names;
   }
@@ -64,8 +67,8 @@ export function manifestNames(url: string, body: string, scope: string): Manifes
     const base = resolve(unescapeXml(match[1]!.trim()), url);
     if (base) bases.push(base);
   }
-  for (const match of body.matchAll(/\b(?:media|initialization|sourceURL|index)\s*=\s*"([^"]*)"/g)) {
-    for (const base of bases) add(unescapeXml(match[1]!), base);
+  for (const match of body.matchAll(/\b(media|initialization|sourceURL|index)\s*=\s*"([^"]*)"/g)) {
+    for (const base of bases) add(unescapeXml(match[2]!), base, match[1] === 'initialization');
   }
   // A BaseURL that is itself a single file (SegmentBase on-demand profile).
   for (const base of bases.slice(1)) add(base, url);
@@ -74,4 +77,9 @@ export function manifestNames(url: string, body: string, scope: string): Manifes
 
 export function isNamed(url: string, set: ManifestNames): boolean {
   return set.exact.has(url) || set.patterns.some((pattern) => pattern.test(url));
+}
+
+/** True when a trusted manifest declares `url` an initialization segment; never decided by file name. */
+export function isInit(url: string, set: ManifestNames): boolean {
+  return set.init.exact.has(url) || set.init.patterns.some((pattern) => pattern.test(url));
 }

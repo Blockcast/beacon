@@ -487,3 +487,19 @@ test('compat: injected in-scope object is not served', async () => {
   assert.deepEqual([...new Uint8Array(await (await s.g.fetch(seg(1))).arrayBuffer())], [1]);
   assert.equal(await text(s.g.fetch(`${DS}/live/ghost.m4s`)), `net:${DS}/live/ghost.m4s`);
 });
+
+test('adapter: HLS key and licence requests reach the network with their original arguments', async () => {
+  const s = setup();
+  const hls = '#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="key.bin"\n#EXT-X-MAP:URI="init.mp4"\n#EXTINF:2,\nhls-1.m4s\n';
+  s.proxy.trustManifest(`${DS}/live/media.m3u8`, new TextEncoder().encode(hls));
+  // Even if key bytes arrive on multicast, a manifest-named key is control-plane and never answered by ROUTE.
+  s.proxy.put({ url: `${DS}/live/key.bin`, data: Uint8Array.of(7), contentType: 'application/octet-stream' });
+  const keyInit = { headers: { authorization: 'Bearer t' }, credentials: 'include' } as RequestInit;
+  assert.equal(await text(s.g.fetch(`${DS}/live/key.bin`, keyInit)), `net:${DS}/live/key.bin`);
+  assert.equal(s.calls[0]![1], keyInit);
+  const licence = new Request(`${DS}/live/license`, { method: 'POST', body: 'challenge' });
+  await s.g.fetch(licence);
+  assert.equal(s.calls[1]![0], licence);
+  assert.equal(licence.bodyUsed, false);
+  assert.equal(s.adapter.status().hits, 0);
+});

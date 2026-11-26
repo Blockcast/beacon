@@ -14,6 +14,7 @@ export type {
 export { installTransparentAdapter } from './adapter.ts';
 export type { AdapterStatus, TransparentAdapter, TransparentAdapterOptions, AdapterTarget } from './adapter.ts';
 
+export { isInit } from './manifest-names.ts';
 export { contentTypeFor, normalizeKey, respond } from './respond.ts';
 export type { RouteReply } from './respond.ts';
 
