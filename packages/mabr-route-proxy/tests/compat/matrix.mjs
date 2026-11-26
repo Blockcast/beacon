@@ -106,7 +106,7 @@ const app = await listen((request, response) => {
   }
   if (url.pathname.startsWith('/mabr/')) {
     const m = url.pathname.slice(6);
-    if (!/^(proxy|adapter|manifest-names|route|index|route-health)\.js$/.test(m)) { response.writeHead(404); return response.end(); }
+    if (!/^(proxy|adapter|manifest-names|respond|route|index|route-health|gateway)\.js$/.test(m)) { response.writeHead(404); return response.end(); }
     response.writeHead(200, { 'content-type': 'text/javascript' });
     return response.end(readFileSync(join(dist, m)));
   }
