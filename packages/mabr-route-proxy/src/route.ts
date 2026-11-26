@@ -1149,7 +1149,7 @@ export class RouteMabrSession {
   #ingest(object: RouteObject): void {
     if (object.integrity >= 100 && object.contentLocation) {
       this.#proxy.put({ url: object.contentLocation, data: object.data, contentType: object.contentType || undefined });
-    }
+    } else this.#proxy.noteDrop(object.integrity < 100 ? 'integrity' : 'no-location');
     this.#options.onObject?.(object);
   }
 
