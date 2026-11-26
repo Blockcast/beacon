@@ -469,6 +469,16 @@ test('adapter: fetch hit honours AbortSignal (pre-aborted and aborted during loo
   assert.equal(s.calls.length, 0, 'aborted hits never fall through to the network');
 });
 
+test('adapter: fetch works with an older AbortSignal without throwIfAborted', async () => {
+  const s = setup();
+  s.proxy.put({ url: seg(1), data: Uint8Array.of(1), contentType: 'video/mp4' });
+  await trusted(s);
+  const signal = { aborted: false } as AbortSignal;
+  assert.equal((await s.g.fetch(seg(1), { signal })).status, 200);
+  const reason = new Error('cancelled');
+  await assert.rejects(s.g.fetch(seg(1), { signal: { aborted: true, reason } as AbortSignal }), (error) => error === reason);
+});
+
 test('adapter: xhr aborted during lookup then re-sent completes once (hit and miss)', async () => {
   FakeXhr.sent = [];
   const s = setup();

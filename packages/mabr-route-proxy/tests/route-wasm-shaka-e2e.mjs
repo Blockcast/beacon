@@ -73,6 +73,7 @@ const files = new Map([
 ]);
 const hlsMaster = Buffer.from('#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-STREAM-INF:BANDWIDTH=1000000\nmedia.m3u8\n');
 const dataByLocation = new Map([...files].map(([location, path]) => [location, path ? readFileSync(path) : hlsMaster]));
+const hlsSegmentSha256 = createHash('sha256').update(dataByLocation.get('hls/hls11.m4s')).digest('hex');
 // Init segments are the ones the manifests declare (DASH initialization=, HLS
 // #EXT-X-MAP), not whatever is called init.mp4. Needs `npm run build` first.
 const { isInit, manifestNames } = await import('../dist/manifest-names.js');
@@ -106,6 +107,7 @@ const createPage = (shakaSource) => `<!doctype html><meta charset=utf-8><video i
 <script>
 if (!Map.prototype.getOrInsertComputed) Map.prototype.getOrInsertComputed = function (key, factory) { if (!this.has(key)) this.set(key, factory(key)); return this.get(key); };
 window.__assets = ${JSON.stringify(encoded)};
+window.__hlsSegmentSha256 = ${JSON.stringify(hlsSegmentSha256)};
 window.__initLocations = ${JSON.stringify(initLocations)};
 window.__sls = ${JSON.stringify(slsFixture.body)};
 window.__fixture = ${JSON.stringify(slsFixture)};
@@ -377,6 +379,11 @@ async function probeHttpSemantics() {
   const segment = dir + (hlsFormat ? 'hls11.m4s' : 'segment_0.m4s');
   const same = (a, b) => a.length === b.length && a.every((value, index) => value === b[index]);
   const full = new Uint8Array(await (await fetch(segment)).arrayBuffer());
+  if (hlsFormat) {
+    const digest = await crypto.subtle.digest('SHA-256', full);
+    const actual = Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, '0')).join('');
+    if (actual !== window.__hlsSegmentSha256) throw new Error('repaired HLS bytes do not match the fixture: ' + actual);
+  }
   const ranged = await fetch(segment, { headers: { range: 'bytes=0-99' } });
   const rangedBytes = new Uint8Array(await ranged.arrayBuffer());
   if (ranged.status !== 206 || ranged.headers.get('content-range') !== 'bytes 0-99/' + full.length || !same(rangedBytes, full.subarray(0, 100))) {

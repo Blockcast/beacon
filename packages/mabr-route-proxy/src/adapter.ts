@@ -76,6 +76,10 @@ const MANIFEST_URL = /\.(?:mpd|m3u8)(?:[?#]|$)/i;
 const MANIFEST_TYPE = /dash\+xml|mpegurl/i;
 const MAX_MANIFEST_BYTES = 2 * 2 ** 20;
 
+function throwIfAborted(signal: AbortSignal | null | undefined): void {
+  if (signal?.aborted) throw signal.reason ?? new DOMException('Aborted', 'AbortError');
+}
+
 function secureTransport(url: URL): boolean {
   return url.protocol === 'https:' || url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]';
 }
@@ -200,10 +204,10 @@ export function installTransparentAdapter(target: AdapterTarget, options: Transp
       };
     } catch { counts.errors++; }
     // A hit must honour AbortSignal like the network would; a miss passes the signal on unchanged.
-    const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
-    signal?.throwIfAborted();
+    const signal = init && 'signal' in init ? init.signal : input instanceof Request ? input.signal : undefined;
+    throwIfAborted(signal);
     const served = info ? await safeServe(info) : undefined;
-    if (served) { signal?.throwIfAborted(); return served; }
+    if (served) { throwIfAborted(signal); return served; }
     const response = await origFetch.call(g, input, init); // R20: the original arguments, unchanged
     if (info) await observe(info, response, 'fetch');
     return response;
