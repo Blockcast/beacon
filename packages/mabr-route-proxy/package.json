@@ -39,6 +39,8 @@
     "directory": "packages/mabr-route-proxy"
   },
   "devDependencies": {
+    "hls.js": "1.7.4",
+    "shaka-player": "5.3.6",
     "typescript": "^5.9.3"
   }
 }
