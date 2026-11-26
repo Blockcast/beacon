@@ -99,7 +99,13 @@ const params = new URL(location.href).searchParams;
 const ingress = params.get('ingress') || 'native';
 // The derived pass passes no baseUrl: start() takes the DS origin root and
 // the PresentationManifest's directory, and Shaka loads session.manifestUrl.
-const derived = params.get('mode') === 'derived';
+const transparent = params.get('mode') === 'transparent';
+// transparent: the page never calls installFetch(); installTransparentAdapter()
+// answers ordinary DS URLs. DASH derives its scope from the SLT; HLS gives an
+// explicit /hls/ scope and no SLT (a multicast manifest never sets scope, R1).
+const hlsFormat = params.get('format') === 'hls';
+const forceFailure = params.get('fail') === '1';
+const derived = params.get('mode') === 'derived' || (transparent && !hlsFormat);
 const { createRouteMabrSession } = await import('/mabr-route-proxy/index.js');
 const rqModule = await import('/rq/raptorq_wasm.js');
 await rqModule.default('/rq/raptorq_wasm_bg.wasm');
@@ -132,10 +138,13 @@ const sessionOptions = {
   // HTTP LLS/SLT selects the service SLS leg. Rendition legs are learned from
   // S-TSID in the proxy's unit coverage; this browser test exercises the same
   // bootstrap before feeding real route.wasm and Shaka.
-  sltUrl: location.origin + '/slt/',
-  serviceId: 'nasa-iss-a',
+  ...(transparent && hlsFormat
+    ? { slsEndpoint: { group: fixture.slsGroup, port: fixture.slsPort, source: fixture.slsSource },
+        baseUrl: location.origin + '/', scope: location.origin + '/hls/' }
+    : { sltUrl: location.origin + '/slt/', serviceId: 'nasa-iss-a',
+        ...(derived ? {} : { baseUrl: location.origin + '/mabr/' }) }),
   discoverEndpoints: true,
-  ...(derived ? {} : { baseUrl: location.origin + '/mabr/' }),
+  ...(transparent ? { transparent: { unauthenticatedSegments: [location.origin] } } : {}),
   raptorq: {
     wasm: { RaptorQDecoder: rqModule.RaptorQDecoder },
     onRecovered: (object) => log('RaptorQ recovered ' + object.contentLocation + ' ' + object.data.length),
@@ -150,7 +159,16 @@ if (derived && session.manifestUrl !== location.origin + '/dash/dash.mpd') {
   throw new Error('derived manifestUrl=' + session.manifestUrl);
 }
 window.__gatewayConfigs = subscriptions.map(({ config }) => config);
-session.installFetch();
+window.__installFetchCalled = false;
+if (transparent) {
+  const installFetch = session.installFetch.bind(session);
+  session.installFetch = () => { window.__installFetchCalled = true; return installFetch(); };
+  if (forceFailure) session.resolve = async () => { throw new Error('forced adapter failure'); };
+  const { installTransparentAdapter } = await import('/mabr-route-proxy/index.js');
+  window.__adapter = installTransparentAdapter(session);
+} else {
+  session.installFetch();
+}
 const send = (group, packet) => {
   const entry = subscriptions.find(({ config }) => config.group === group);
   if (!entry?.callback) throw new Error('no active multicast subscription for ' + group);
@@ -223,12 +241,12 @@ if (!subscriptions.some(({ config }) => config.group === fixture.mediaGroup)) {
 }
 window.__gatewayConfigs = subscriptions.map(({ config }) => config);
 for (const [location, base64] of Object.entries(assets)) {
-  if (location === 'hls/hls11.m4s') continue;
+  if (location === 'hls/hls11.m4s' && !transparent) continue;
   sendObject(fixture.mediaGroup, Object.keys(assets).indexOf(location) + 1, location.endsWith('.mpd') || location.endsWith('.m3u8') ? 3 : location.endsWith('init.mp4') ? 5 : 8, Uint8Array.from(atob(base64), (value) => value.charCodeAt(0)));
 }
 
 // The HLS segment is outside the derived pass's /dash/ scope.
-if (!derived) {
+if (!derived && !transparent) {
   // Mirror the deployed staging sender (route/sender.go): source on the
   // byte-offset flow, and per source block of K symbols (the final block
   // K'-native short) RFC 6330 repair on the RepairFlow group under the same
@@ -286,12 +304,16 @@ async function play(url, label) {
   if (video.readyState < 2 || video.buffered.length < 1) throw new Error(label + ' did not decode buffered media');
   await player.unload();
 }
-if (derived) {
+if (transparent) {
+  // An ordinary URL, not session.manifestUrl: the player is unmodified.
+  await play(location.origin + (hlsFormat ? '/hls/master.m3u8' : '/dash/dash.mpd'), hlsFormat ? 'HLS transparent' : 'DASH transparent');
+} else if (derived) {
   await play(session.manifestUrl, 'DASH derived');
 } else {
   await play(location.origin + '/mabr/dash/dash.mpd', 'DASH');
   await play(location.origin + '/mabr/hls/master.m3u8', 'HLS master');
 }
+window.__cacheStats = () => session.cacheStats;
 window.__done = true;
 </script>`;
 
@@ -324,13 +346,19 @@ const server = http.createServer((request, response) => {
     response.end(raptorqWasm);
   } else if (path.startsWith('/mabr-route-proxy/')) {
     const modulePath = path.slice('/mabr-route-proxy/'.length);
-    if (!['index.js', 'proxy.js', 'route.js', 'route-health.js'].includes(modulePath)) {
+    if (!['index.js', 'proxy.js', 'route.js', 'route-health.js', 'adapter.js', 'manifest-names.js'].includes(modulePath)) {
       response.writeHead(404);
       response.end('module miss');
       return;
     }
     response.writeHead(200, { 'content-type': 'text/javascript' });
     response.end(readFileSync(join(packageRoot, 'dist', modulePath)));
+  } else if (/^\/(?:dash|hls)\//.test(path) && dataByLocation.has(path.slice(1))) {
+    // Plain DS over HTTPS: the transparent passes load manifests (and, when
+    // ROUTE cannot answer, segments) from here.
+    const data = dataByLocation.get(path.slice(1));
+    response.writeHead(200, { 'content-type': path.endsWith('.mpd') ? 'application/dash+xml' : path.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/mp4' });
+    response.end(data);
   } else if (path === '/favicon.ico') {
     response.writeHead(204);
     response.end();
@@ -367,6 +395,9 @@ try {
         log: window.__log,
         fec: window.__fec,
         gatewayConfigs: window.__gatewayConfigs,
+        installFetchCalled: window.__installFetchCalled,
+        adapter: window.__adapter?.status(),
+        cache: window.__cacheStats?.(),
       }));
       assert.equal(errors.length, 0, errors.join(' | '));
       assert.equal(state.done, true, JSON.stringify(state));
@@ -409,6 +440,29 @@ try {
   assert.ok(requests.includes('/slt/7'), 'HTTP SLT document was not requested');
   const mediaRequests = requests.filter((path) => path.startsWith('/mabr/'));
   assert.deepEqual(mediaRequests, [], `cached media escaped to HTTP: ${mediaRequests.join(', ')}`);
+  // Transparent interception: an unmodified Shaka loads ordinary DS URLs; no
+  // installFetch() call. Manifests come over unicast (R8); segments from ROUTE.
+  for (const format of ['dash', 'hls']) {
+    const from = requests.length;
+    const state = await openPage(`ingress=native&shaka=${shakaVariants[0].name}&mode=transparent&format=${format}`);
+    const seen = requests.slice(from).filter((path) => path.startsWith(`/${format}/`));
+    assert.equal(state.installFetchCalled, false, 'transparent page must not call installFetch()');
+    assert.ok(state.cache.hits > 0, `${format}: cacheStats.hits=${state.cache.hits}`);
+    assert.ok(seen.some((path) => /\.(mpd|m3u8)$/.test(path)), `${format}: manifest must load over unicast: ${seen.join(',')}`);
+    const media = seen.filter((path) => /\.(m4s|mp4)$/.test(path));
+    assert.deepEqual(media, [], `${format}: segments escaped to HTTP: ${media.join(',')}`);
+    console.log(`transparent/${format}: hits=${state.cache.hits} misses=${state.cache.misses} adapter=${JSON.stringify(state.adapter)}`);
+  }
+  // Forced adapter failure: every lookup throws, playback still works over unicast.
+  {
+    const from = requests.length;
+    const state = await openPage(`ingress=native&shaka=${shakaVariants[0].name}&mode=transparent&fail=1`);
+    const media = requests.slice(from).filter((path) => /^\/dash\/.*\.(m4s|mp4)$/.test(path));
+    assert.ok(media.length > 0, 'forced failure must fall through to unicast segments');
+    assert.equal(state.cache.hits, 0);
+    assert.ok(state.adapter.errors > 0, JSON.stringify(state.adapter));
+    console.log(`transparent/forced-failure: unicast media=${media.length} adapter=${JSON.stringify(state.adapter)}`);
+  }
   console.log('PASS: real route.wasm + RaptorQ loss recovery reached Shaka DASH/HLS; native, AMT, and tuner gateway contracts passed; derived DS URLs played DASH from the ROUTE cache (network ingress simulated)');
 } finally {
   await browser.close();

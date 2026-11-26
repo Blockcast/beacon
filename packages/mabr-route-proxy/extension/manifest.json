@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "Blockcast ROUTE interception (contract)",
+  "version": "0.0.0",
+  "description": "Permission contract for the MV3 content-script packaging of installTransparentAdapter (threat model R14). The loader is not built yet.",
+  "permissions": ["scripting", "storage"],
+  "host_permissions": [],
+  "optional_host_permissions": ["https://*/*"],
+  "content_scripts": []
+}

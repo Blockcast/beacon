@@ -241,3 +241,49 @@ Set `PMG_ROOT`, `ROUTE_WASM`, `ROUTE_WASM_EXEC`, `RAPTORQ_JS`, `RAPTORQ_WASM`,
 live outside the adjacent `pim-multicast-gateway` checkout. `CHROME_PATH` is
 useful when the installed browser is available but Playwright's pinned revision
 is not.
+
+## Transparent interception for unmodified players
+
+`installFetch()` needs page code. `installTransparentAdapter()` (ADR 0001,
+mechanism A/B) patches page-world `fetch` and `XMLHttpRequest` instead, so an
+unmodified Shaka, hls.js or dash.js loading an ordinary DASH/HLS URL is answered
+from ROUTE. It must run before the player is created (an extension content
+script at `document_start`, or one `<script type=module>` tag): Shaka's Fetch
+plugin snapshots `window.fetch` when it loads. A browser cannot intercept a page
+with no script on it and no extension.
+
+```ts
+const session = createRouteMabrSession({
+  gateway: window.multicast,          // from @blockcast/window-multicast-bridge, unchanged
+  wasm: routeWasm, ingress: 'native',
+  sltUrl: 'https://live.example',     // scope comes from the HTTPS SLT, never from multicast (R1)
+  serviceId: 'generic-service',
+  transparent: { unauthenticatedSegments: ['https://live.example'] },
+});
+await session.start();
+const adapter = installTransparentAdapter(session);   // no installFetch()
+player.load('https://live.example/live/manifest.mpd'); // ordinary URL
+adapter.status();   // { hits, misses, bypassed, errors, missRate, degraded }
+```
+
+How it behaves: the manifest is loaded over HTTPS unicast and the adapter learns
+what it names; ROUTE answers only those segments (R8, R10). A miss, `no-store`,
+an error or anything not eligible goes to the original `fetch`/XHR with the
+original arguments (R20, R22). `session.start()` never sets scope from a
+multicast SLS manifest location when `transparent` is set, and `manifestUrl`
+stays unset in that case.
+
+**Segment bytes are unauthenticated.** ROUTE carries no authentication and the
+`integrity` value from route.wasm is completeness, not authenticity. Until the DS
+publishes a digest or signature channel, segments are served only when you list
+the DS origin in `transparent.unauthenticatedSegments`; the default serves none
+(R11). An on-path injector can then still replace media inside the scope before
+the first write; encrypted content reduces that to denial of playback. A
+multicast manifest is served only if `transparent.verifyManifest` accepts it (R9).
+
+Mitigation to test map (threat model §5; tests in `src/adapter.test.ts`): R1–R24
+each have the test named in the threat model. Not built, so their tests are
+`skip` with a reason: R13 (Service Worker adapter, deferred by the ADR) and R16
+(local native proxy). R14 is checked against `extension/manifest.json`, the
+permission contract for the future extension packaging; there is no extension
+loader yet.

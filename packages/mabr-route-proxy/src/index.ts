@@ -8,7 +8,10 @@ export type {
   RouteCacheEvent,
   RouteCacheStats,
   RouteSegment,
+  TransparentPolicy,
 } from './proxy.ts';
+export { installTransparentAdapter } from './adapter.ts';
+export type { AdapterStatus, TransparentAdapter, TransparentAdapterOptions, AdapterTarget } from './adapter.ts';
 
 export { RouteMabrSession, RouteRaptorQCollector, createRouteMabrSession, discoverSlsEndpoint } from './route.ts';
 export type {
