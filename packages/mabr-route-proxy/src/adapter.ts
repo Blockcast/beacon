@@ -199,8 +199,11 @@ export function installTransparentAdapter(target: AdapterTarget, options: Transp
         destination: request?.destination ?? '',
       };
     } catch { counts.errors++; }
+    // A hit must honour AbortSignal like the network would; a miss passes the signal on unchanged.
+    const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+    signal?.throwIfAborted();
     const served = info ? await safeServe(info) : undefined;
-    if (served) return served;
+    if (served) { signal?.throwIfAborted(); return served; }
     const response = await origFetch.call(g, input, init); // R20: the original arguments, unchanged
     if (info) await observe(info, response, 'fetch');
     return response;

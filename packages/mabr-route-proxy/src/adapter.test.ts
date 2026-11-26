@@ -456,6 +456,19 @@ test('adapter: xhr abort during the ROUTE lookup cancels the request (hit and mi
   adapter.restore();
 });
 
+test('adapter: fetch hit honours AbortSignal (pre-aborted and aborted during lookup)', async () => {
+  const s = setup();
+  s.proxy.put({ url: seg(1), data: Uint8Array.of(1), contentType: 'video/mp4' });
+  await trusted(s);
+  await assert.rejects(s.g.fetch(seg(1), { signal: AbortSignal.abort() }), { name: 'AbortError' });
+  const controller = new AbortController();
+  const pending = s.g.fetch(new Request(seg(1), { signal: controller.signal }));
+  controller.abort();
+  await assert.rejects(pending, { name: 'AbortError' });
+  assert.equal((await s.g.fetch(seg(1))).status, 200, 'an abort does not poison later requests');
+  assert.equal(s.calls.length, 0, 'aborted hits never fall through to the network');
+});
+
 test('adapter: xhr aborted during lookup then re-sent completes once (hit and miss)', async () => {
   FakeXhr.sent = [];
   const s = setup();

@@ -17,6 +17,7 @@
 // are checked as gateway configuration contracts.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import http from 'node:http';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -35,6 +36,20 @@ const productionShakaPath = process.env.SHAKA_PRODUCTION_JS || join(pimRoot, 'sh
 const assetsRoot = process.env.MEDIA_ROOT || join(pimRoot, 'shaka-player/test/test/assets');
 const playwrightPath = process.env.PLAYWRIGHT || join(pimRoot, 'node_modules/playwright/index.mjs');
 const chromePath = process.env.CHROME_PATH;
+// Unmodified players from npm (pinned devDependencies), loaded as published
+// bundles: no Blockcast fork, no patch, no adapter hook in the player.
+const npmPlayers = {
+  'shaka-upstream': { pkg: 'shaka-player', file: 'dist/shaka-player.compiled.js' },
+  hlsjs: { pkg: 'hls.js', file: 'dist/hls.min.js' },
+};
+for (const player of Object.values(npmPlayers)) {
+  const root = join(packageRoot, 'node_modules', player.pkg);
+  player.path = join(root, player.file);
+  player.version = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version;
+  const pinned = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8')).devDependencies[player.pkg];
+  assert.equal(player.version, pinned, `${player.pkg} installed ${player.version}, pinned ${pinned}`);
+  player.sha256 = createHash('sha256').update(readFileSync(player.path)).digest('hex');
+}
 
 const routeWasm = readFileSync(routeWasmPath);
 const wasmExec = readFileSync(routeExecPath);
@@ -114,7 +129,11 @@ const transparent = params.get('mode') === 'transparent';
 // explicit /hls/ scope and no SLT (a multicast manifest never sets scope, R1).
 const hlsFormat = params.get('format') === 'hls';
 const forceFailure = params.get('fail') === '1';
+const playerName = params.get('player') || 'shaka';
 const derived = params.get('mode') === 'derived' || (transparent && !hlsFormat);
+// Loss + RaptorQ repair runs in the default pass and in the transparent HLS
+// pass, where the recovered segment must reach an unmodified player.
+const fecPass = !derived;
 const { createRouteMabrSession } = await import('/mabr-route-proxy/index.js');
 const rqModule = await import('/rq/raptorq_wasm.js');
 await rqModule.default('/rq/raptorq_wasm_bg.wasm');
@@ -147,9 +166,11 @@ const sessionOptions = {
   // HTTP LLS/SLT selects the service SLS leg. Rendition legs are learned from
   // S-TSID in the proxy's unit coverage; this browser test exercises the same
   // bootstrap before feeding real route.wasm and Shaka.
+  // Transparent passes are configured with an HTTPS SLT URL and a service id
+  // only: (S,G), port and cache scope all come from the SLT. /slt/8 is the
+  // same SLT advertising the HLS presentation manifest.
   ...(transparent && hlsFormat
-    ? { slsEndpoint: { group: fixture.slsGroup, port: fixture.slsPort, source: fixture.slsSource },
-        baseUrl: location.origin + '/', scope: location.origin + '/hls/' }
+    ? { sltUrl: location.origin + '/slt/8', serviceId: 'nasa-iss-a' }
     : { sltUrl: location.origin + '/slt/', serviceId: 'nasa-iss-a',
         ...(derived ? {} : { baseUrl: location.origin + '/mabr/' }) }),
   discoverEndpoints: true,
@@ -162,9 +183,11 @@ const sessionOptions = {
 // AMT discovery is relay-less in the browser contract. The SLS source is
 // carried into the gateway subscription, which resolves RFC 8777 TYPE260
 // records for that source; the DS hostname is only the HTTPS SLS authority.
+window.__sessionOptions = JSON.stringify(sessionOptions, (key, value) => (key === 'gateway' || key === 'wasm' || key === 'raptorq' ? undefined : value));
 const session = createRouteMabrSession(sessionOptions);
 await session.start();
-if (derived && session.manifestUrl !== location.origin + '/dash/dash.mpd') {
+const expectedManifest = location.origin + (hlsFormat ? '/hls/master.m3u8' : '/dash/dash.mpd');
+if ((derived || transparent) && session.manifestUrl !== expectedManifest) {
   throw new Error('derived manifestUrl=' + session.manifestUrl);
 }
 window.__gatewayConfigs = subscriptions.map(({ config }) => config);
@@ -250,12 +273,12 @@ if (!subscriptions.some(({ config }) => config.group === fixture.mediaGroup)) {
 }
 window.__gatewayConfigs = subscriptions.map(({ config }) => config);
 for (const [location, base64] of Object.entries(assets)) {
-  if (location === 'hls/hls11.m4s' && !transparent) continue;
+  if (location === 'hls/hls11.m4s' && (fecPass || !transparent)) continue;
   sendObject(fixture.mediaGroup, Object.keys(assets).indexOf(location) + 1, location.endsWith('.mpd') || location.endsWith('.m3u8') ? 3 : window.__initLocations.includes(location) ? 5 : 8, Uint8Array.from(atob(base64), (value) => value.charCodeAt(0)));
 }
 
 // The HLS segment is outside the derived pass's /dash/ scope.
-if (!derived && !transparent) {
+if (fecPass) {
   // Mirror the deployed staging sender (route/sender.go): source on the
   // byte-offset flow, and per source block of K symbols (the final block
   // K'-native short) RFC 6330 repair on the RepairFlow group under the same
@@ -292,30 +315,115 @@ if (!derived && !transparent) {
   window.__fec = { location: fecLocation, toi: fecToi, transferLength: recovered.length, sourceSymbols: Math.ceil(recovered.length / T), droppedSource: 1, repairSymbols, raptorqQueued };
   if (raptorqQueued === 0) throw new Error('route.wasm queued no encoding-6 symbols fec=' + JSON.stringify(window.__fec));
   log('after FEC rq=' + raptorqQueued);
+  for (let attempt = 0; attempt < 100 && !window.__log.some((value) => value.startsWith('RaptorQ recovered ' + fecLocation + ' ')); attempt++) {
+    await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+  }
+  if (!window.__log.some((value) => value.startsWith('RaptorQ recovered ' + fecLocation + ' '))) throw new Error('RaptorQ recovery callback missing');
+}
+// Transparent: the recovered segment is checked by the player itself and by
+// the node side asserting it never reached HTTP. Default mode reads it here.
+if (fecPass && !transparent) {
+  const fecLocation = window.__fec.location;
+  const recovered = Uint8Array.from(atob(assets[fecLocation]), (value) => value.charCodeAt(0));
   const recoveredResponse = await session.fetch(location.origin + '/mabr/' + fecLocation);
   if (recoveredResponse.status !== 200) throw new Error('recovered object status=' + recoveredResponse.status + ' log=' + JSON.stringify(window.__log) + ' fec=' + JSON.stringify(window.__fec) + ' rq=' + routeExports.route_get_raptorq_count());
   const recoveredBytes = new Uint8Array(await recoveredResponse.arrayBuffer());
   if (recoveredBytes.length !== recovered.length || recoveredBytes.some((value, index) => value !== recovered[index])) throw new Error('recovered object bytes mismatch');
-  if (!window.__log.some((value) => value.startsWith('RaptorQ recovered ' + fecLocation + ' '))) throw new Error('RaptorQ recovery callback missing');
   log('RaptorQ media fetch verified');
 }
 
-const shakaScript = document.createElement('script');
-shakaScript.text = window.__shaka;
-document.head.append(shakaScript);
-const player = new shaka.Player(document.querySelector('#v'));
+if (playerName === 'shaka') {
+  const shakaScript = document.createElement('script');
+  shakaScript.text = window.__shaka;
+  document.head.append(shakaScript);
+} else {
+  // Published npm bundle, loaded exactly as a site would load it.
+  await new Promise((resolveLoad, rejectLoad) => {
+    const script = document.createElement('script');
+    script.src = '/player/' + playerName + '.js';
+    script.onload = resolveLoad;
+    script.onerror = () => rejectLoad(new Error('failed to load player ' + playerName));
+    document.head.append(script);
+  });
+}
+const video = document.querySelector('#v');
+let player;
+if (playerName === 'shaka') player = new shaka.Player(video);
+else if (playerName === 'shaka-upstream') { player = new shaka.Player(); await player.attach(video); }
 async function play(url, label) {
-  await player.load(url);
-  await document.querySelector('#v').play();
+  let hls;
+  if (playerName === 'hlsjs') {
+    if (!Hls.isSupported()) throw new Error('hls.js: MediaSource unsupported');
+    hls = new Hls({ enableWorker: false });
+    await new Promise((resolveLoad, rejectLoad) => {
+      hls.on(Hls.Events.ERROR, (_event, data) => { if (data.fatal) rejectLoad(new Error('hls.js fatal ' + data.type + '/' + data.details)); });
+      hls.on(Hls.Events.MANIFEST_PARSED, resolveLoad);
+      hls.attachMedia(video);
+      hls.loadSource(url);
+    });
+  } else {
+    await player.load(url);
+  }
+  await video.play();
   await new Promise((resolve) => setTimeout(resolve, 1200));
-  const video = document.querySelector('#v');
   log(label + ':readyState=' + video.readyState + ',buffered=' + video.buffered.length);
   if (video.readyState < 2 || video.buffered.length < 1) throw new Error(label + ' did not decode buffered media');
-  await player.unload();
+  if (hls) hls.destroy(); else await player.unload();
+}
+// HTTP semantics an ordinary player relies on, against the same ordinary DS
+// URLs, through the installed adapter (fetch and XHR).
+async function probeHttpSemantics() {
+  const dir = location.origin + (hlsFormat ? '/hls/' : '/dash/');
+  const segment = dir + (hlsFormat ? 'hls11.m4s' : 'segment_0.m4s');
+  const same = (a, b) => a.length === b.length && a.every((value, index) => value === b[index]);
+  const full = new Uint8Array(await (await fetch(segment)).arrayBuffer());
+  const ranged = await fetch(segment, { headers: { range: 'bytes=0-99' } });
+  const rangedBytes = new Uint8Array(await ranged.arrayBuffer());
+  if (ranged.status !== 206 || ranged.headers.get('content-range') !== 'bytes 0-99/' + full.length || !same(rangedBytes, full.subarray(0, 100))) {
+    throw new Error('range: status=' + ranged.status + ' content-range=' + ranged.headers.get('content-range') + ' bytes=' + rangedBytes.length);
+  }
+  const head = await fetch(segment, { method: 'HEAD' });
+  const headBytes = (await head.arrayBuffer()).byteLength;
+  if (head.status !== 200 || head.headers.get('content-length') !== String(full.length) || headBytes !== 0) {
+    throw new Error('HEAD: status=' + head.status + ' content-length=' + head.headers.get('content-length') + ' body=' + headBytes);
+  }
+  const xhrRange = await new Promise((resolveXhr, rejectXhr) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('GET', segment);
+    xhr.responseType = 'arraybuffer';
+    xhr.setRequestHeader('Range', 'bytes=100-199');
+    xhr.onload = () => resolveXhr(xhr);
+    xhr.onerror = () => rejectXhr(new Error('xhr range error'));
+    xhr.send();
+  });
+  if (xhrRange.status !== 206 || !same(new Uint8Array(xhrRange.response), full.subarray(100, 200))) throw new Error('xhr range: status=' + xhrRange.status);
+  const controller = new AbortController();
+  const aborted = fetch(segment, { signal: controller.signal });
+  controller.abort();
+  const abortOutcome = await aborted.then(() => 'resolved', (error) => error.name);
+  if (abortOutcome !== 'AbortError') throw new Error('fetch abort: ' + abortOutcome);
+  const xhrAbort = await new Promise((resolveXhr) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('GET', segment);
+    xhr.onabort = () => resolveXhr('abort status=' + xhr.status);
+    xhr.onload = () => resolveXhr('load');
+    xhr.send();
+    xhr.abort();
+  });
+  if (xhrAbort !== 'abort status=0') throw new Error('xhr abort: ' + xhrAbort);
+  if ((await fetch(segment)).status !== 200) throw new Error('fetch after abort failed');
+  // Key and licence requests stay on HTTP even inside the cache scope, and a
+  // URL outside the scope is never intercepted.
+  if ((await (await fetch(dir + 'key.bin')).text()) !== 'http-key') throw new Error('key request did not reach HTTP');
+  const licence = await fetch(location.origin + '/license', { method: 'POST', body: 'challenge' });
+  if ((await licence.text()) !== 'http-license:challenge') throw new Error('licence request did not reach HTTP');
+  if ((await (await fetch(location.origin + '/other/segment_0.m4s')).text()) !== 'http-other') throw new Error('out-of-scope request did not reach HTTP');
+  log('probes: range, HEAD, xhr range, fetch/xhr abort, key, licence and out-of-scope ok');
 }
 if (transparent) {
   // An ordinary URL, not session.manifestUrl: the player is unmodified.
-  await play(location.origin + (hlsFormat ? '/hls/master.m3u8' : '/dash/dash.mpd'), hlsFormat ? 'HLS transparent' : 'DASH transparent');
+  await play(location.origin + (hlsFormat ? '/hls/master.m3u8' : '/dash/dash.mpd'), (hlsFormat ? 'HLS' : 'DASH') + ' transparent ' + playerName);
+  if (!forceFailure) await probeHttpSemantics();
 } else if (derived) {
   await play(session.manifestUrl, 'DASH derived');
 } else {
@@ -323,10 +431,14 @@ if (transparent) {
   await play(location.origin + '/mabr/hls/master.m3u8', 'HLS master');
 }
 window.__cacheStats = () => session.cacheStats;
+window.__sessionManifestUrl = session.manifestUrl;
 window.__done = true;
 </script>`;
 
 const requests = [];
+// The same SLT, advertising the HLS presentation manifest instead of DASH.
+const hlsSlt = slsFixture.slt.replace('/dash/dash.mpd', '/hls/master.m3u8');
+assert.notEqual(hlsSlt, slsFixture.slt, 'fixture SLT does not advertise /dash/dash.mpd');
 const server = http.createServer((request, response) => {
   const path = request.url?.split('?')[0] || '/';
   requests.push(path);
@@ -341,6 +453,25 @@ const server = http.createServer((request, response) => {
   } else if (path === '/slt/7') {
     response.writeHead(200, { 'content-type': 'application/xml' });
     response.end(slsFixture.slt);
+  } else if (path === '/slt/8') {
+    response.writeHead(200, { 'content-type': 'application/xml' });
+    response.end(hlsSlt);
+  } else if (path.startsWith('/player/') && npmPlayers[path.slice('/player/'.length, -'.js'.length)]) {
+    response.writeHead(200, { 'content-type': 'text/javascript' });
+    response.end(readFileSync(npmPlayers[path.slice('/player/'.length, -'.js'.length)].path));
+  } else if (path === '/dash/key.bin' || path === '/hls/key.bin') {
+    response.writeHead(200, { 'content-type': 'application/octet-stream' });
+    response.end('http-key');
+  } else if (path === '/license' && request.method === 'POST') {
+    const chunks = [];
+    request.on('data', (chunk) => chunks.push(chunk));
+    request.on('end', () => {
+      response.writeHead(200, { 'content-type': 'application/octet-stream' });
+      response.end('http-license:' + Buffer.concat(chunks).toString());
+    });
+  } else if (path === '/other/segment_0.m4s') {
+    response.writeHead(200, { 'content-type': 'video/mp4' });
+    response.end('http-other');
   } else if (path === '/route.wasm') {
     response.writeHead(200, { 'content-type': 'application/wasm' });
     response.end(routeWasm);
@@ -407,6 +538,8 @@ try {
         installFetchCalled: window.__installFetchCalled,
         adapter: window.__adapter?.status(),
         cache: window.__cacheStats?.(),
+        sessionOptions: window.__sessionOptions,
+        manifestUrl: window.__sessionManifestUrl,
       }));
       assert.equal(errors.length, 0, errors.join(' | '));
       assert.equal(state.done, true, JSON.stringify(state));
@@ -451,16 +584,49 @@ try {
   assert.deepEqual(mediaRequests, [], `cached media escaped to HTTP: ${mediaRequests.join(', ')}`);
   // Transparent interception: an unmodified Shaka loads ordinary DS URLs; no
   // installFetch() call. Manifests come over unicast (R8); segments from ROUTE.
-  for (const format of ['dash', 'hls']) {
+  for (const [name, player] of Object.entries(npmPlayers)) console.log(`unmodified player ${player.pkg}@${player.version} sha256=${player.sha256} (${name})`);
+  const transparentPasses = [
+    ['shaka', 'dash'], ['shaka', 'hls'],
+    ['shaka-upstream', 'dash'], ['shaka-upstream', 'hls'],
+    ['hlsjs', 'hls'],
+  ];
+  for (const [player, format] of transparentPasses) {
     const from = requests.length;
-    const state = await openPage(`ingress=native&shaka=${shakaVariants[0].name}&mode=transparent&format=${format}`);
+    const state = await openPage(`ingress=native&shaka=${shakaVariants[0].name}&mode=transparent&format=${format}&player=${player}`);
     const seen = requests.slice(from).filter((path) => path.startsWith(`/${format}/`));
     assert.equal(state.installFetchCalled, false, 'transparent page must not call installFetch()');
-    assert.ok(state.cache.hits > 0, `${format}: cacheStats.hits=${state.cache.hits}`);
-    assert.ok(seen.some((path) => /\.(mpd|m3u8)$/.test(path)), `${format}: manifest must load over unicast: ${seen.join(',')}`);
+    assert.ok(state.cache.hits > 0, `${player}/${format}: cacheStats.hits=${state.cache.hits}`);
+    assert.ok(seen.some((path) => /\.(mpd|m3u8)$/.test(path)), `${player}/${format}: manifest must load over unicast: ${seen.join(',')}`);
     const media = seen.filter((path) => /\.(m4s|mp4)$/.test(path));
-    assert.deepEqual(media, [], `${format}: segments escaped to HTTP: ${media.join(',')}`);
-    console.log(`transparent/${format}: hits=${state.cache.hits} misses=${state.cache.misses} adapter=${JSON.stringify(state.adapter)}`);
+    assert.deepEqual(media, [], `${player}/${format}: segments escaped to HTTP: ${media.join(',')}`);
+    // Range/HEAD/abort/key/licence/scope probes ran in the page; the control
+    // plane requests must have reached this HTTP server.
+    assert.ok(state.log.some((line) => line.startsWith('probes: ')), `${player}/${format}: probes did not run`);
+    const after = requests.slice(from);
+    for (const path of [`/${format}/key.bin`, '/license', '/other/segment_0.m4s']) {
+      assert.ok(after.includes(path), `${player}/${format}: ${path} did not reach HTTP`);
+    }
+    // No hard-coded (S,G): the page was configured with an HTTPS SLT URL and a
+    // service id; every multicast join came from the SLT and its S-TSID.
+    const configured = JSON.parse(state.sessionOptions);
+    assert.deepEqual(Object.keys(configured).sort(), ['discoverEndpoints', 'ingress', 'serviceId', 'sltUrl', 'transparent']);
+    assert.doesNotMatch(state.sessionOptions, /\b\d{1,3}(?:\.\d{1,3}){3}\b/, 'page options carry an IP literal');
+    assert.ok(after.includes(format === 'hls' ? '/slt/8' : '/slt/7'), `${player}/${format}: SLT was not fetched over HTTP`);
+    assert.deepEqual(state.gatewayConfigs.map(({ group, source }) => [group, source]), [
+      [slsFixture.slsGroup, slsFixture.slsSource],
+      [slsFixture.mediaGroup, slsFixture.mediaSource],
+      [slsFixture.repairGroup, slsFixture.mediaSource],
+    ]);
+    assert.equal(state.manifestUrl, `http://127.0.0.1:${port}/${format === 'hls' ? 'hls/master.m3u8' : 'dash/dash.mpd'}`);
+    if (format === 'hls') {
+      // One source packet of hls11.m4s was dropped on multicast; only the
+      // RaptorQ repair flow could restore it, and the player consumed it.
+      assert.equal(state.fec.droppedSource, 1);
+      assert.ok(state.fec.repairSymbols > 0 && state.fec.raptorqQueued > 0, JSON.stringify(state.fec));
+      assert.ok(state.log.some((line) => line.startsWith('RaptorQ recovered hls/hls11.m4s ')), state.log.join('; '));
+      assert.ok(!seen.includes('/hls/hls11.m4s'), 'repaired segment was fetched over HTTP');
+    }
+    console.log(`transparent/${player}/${format}: hits=${state.cache.hits} misses=${state.cache.misses} adapter=${JSON.stringify(state.adapter)} log=${state.log.join('; ')}`);
   }
   // Forced adapter failure: every lookup throws, playback still works over unicast.
   {
@@ -472,6 +638,7 @@ try {
     assert.ok(state.adapter.errors > 0, JSON.stringify(state.adapter));
     console.log(`transparent/forced-failure: unicast media=${media.length} adapter=${JSON.stringify(state.adapter)}`);
   }
+  console.log('PASS: unmodified players (Blockcast Shaka build, upstream shaka-player, hls.js) played ordinary DS URLs through the transparent adapter with SLT-only config; range/HEAD/abort/key/licence/scope probes and transparent RaptorQ repair passed');
   console.log('PASS: real route.wasm + RaptorQ loss recovery reached Shaka DASH/HLS; native, AMT, and tuner gateway contracts passed; derived DS URLs played DASH from the ROUTE cache (network ingress simulated)');
 } finally {
   await browser.close();
