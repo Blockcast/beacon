@@ -372,6 +372,7 @@ class FakeXhr extends EventTarget {
   open(_method: string, url: string) { this.url = url; this.headers = []; }
   setRequestHeader(name: string, value: string) { this.headers.push([name, value]); }
   getResponseHeader(): string | null { return null; }
+  abort() { /* native: no-op while unsent */ }
   send() {
     FakeXhr.sent.push({ url: this.url, headers: this.headers });
     queueMicrotask(async () => {
@@ -409,6 +410,28 @@ test('adapter: xhr hit is served from ROUTE and a miss reaches the network', asy
   assert.deepEqual(FakeXhr.sent[1], { url: `${DS}/live/other.bin`, headers: [['X-A', '1']] });
   const bypass = await run(seg(1), [['Cache-Control', 'no-cache']]);
   assert.equal(bypass.response, 'net', 'no-cache bypasses ROUTE');
+  adapter.restore();
+});
+
+test('adapter: xhr abort during the ROUTE lookup cancels the request (hit and miss)', async () => {
+  FakeXhr.sent = [];
+  const s = setup();
+  (s.g as { XMLHttpRequest?: unknown }).XMLHttpRequest = FakeXhr;
+  s.adapter.restore();
+  const adapter = installTransparentAdapter(s.proxy, { global: s.g });
+  s.proxy.put({ url: seg(1), data: Uint8Array.of(104, 105), contentType: 'video/mp4' });
+  await trusted(s);
+  for (const url of [seg(1), `${DS}/live/other.bin`]) {
+    const xhr = new FakeXhr();
+    let events = '';
+    for (const t of ['abort', 'load', 'loadend']) xhr.addEventListener(t, () => { events += t + ' '; });
+    xhr.open('GET', url);
+    xhr.send();
+    xhr.abort();
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(events, 'abort loadend ', `no load after abort: ${url}`);
+  }
+  assert.deepEqual(FakeXhr.sent, [], 'nothing was sent or resurrected');
   adapter.restore();
 });
 
