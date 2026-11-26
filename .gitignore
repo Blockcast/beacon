@@ -2,3 +2,4 @@ node_modules/
 dist/
 *.tsbuildinfo
 *.tgz
+packages/mabr-route-proxy/tests/compat/compat-matrix-results.json
