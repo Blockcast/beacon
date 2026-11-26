@@ -555,3 +555,35 @@ for (const mode of ['onreadystatechange', 'load-listener-before-send'] as const)
     assert.ok(sent[1]!.startsWith('blob:'), `segment went to network: ${sent.join(', ')}`);
   });
 }
+
+test('adapter: fetch segment issued from XHR playlist readystatechange(4) is served from ROUTE', async () => {
+  const M3U8 = '#EXTM3U\n#EXT-X-MAP:URI="init.mp4"\n#EXTINF:2,\nseg-1.m4s\n';
+  class Xhr extends EventTarget {
+    responseType = ''; status = 0; response: unknown = null; readyState = 0;
+    onreadystatechange: ((this: Xhr) => void) | null = null;
+    open(_m: string, _u: string) { this.readyState = 1; }
+    setRequestHeader() {}
+    getResponseHeader(n: string) { return n === 'content-type' ? 'application/vnd.apple.mpegurl' : null; }
+    abort() {}
+    send() {
+      queueMicrotask(() => {
+        this.status = 200; this.response = M3U8; this.readyState = 4;
+        this.onreadystatechange?.call(this);
+        this.dispatchEvent(new Event('load')); this.dispatchEvent(new Event('loadend'));
+      });
+    }
+  }
+  let network = 0;
+  const proxy = new MabrRouteProxy({ baseUrl: `${DS}/`, scope: `${DS}/live/`, transparent: { unauthenticatedSegments: [DS] } });
+  proxy.put({ url: seg(1), data: Uint8Array.of(1), contentType: 'video/mp4' });
+  const g = { fetch: (async () => { network++; return new Response('net'); }) as typeof fetch, location: { href: `${DS}/p.html`, origin: DS }, XMLHttpRequest: Xhr } as unknown as AdapterGlobal;
+  installTransparentAdapter(proxy, { global: g });
+  const res = await new Promise<Response>((done) => {
+    const pl = new Xhr();
+    pl.open('GET', `${DS}/live/media.m3u8`);
+    pl.onreadystatechange = function() { if (this.readyState === 4) g.fetch(seg(1)).then(done); };
+    pl.send();
+  });
+  assert.deepEqual([...new Uint8Array(await res.arrayBuffer())], [1]);
+  assert.equal(network, 0);
+});
