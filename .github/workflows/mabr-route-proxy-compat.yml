@@ -40,8 +40,13 @@ jobs:
       - run: npm run build
       - run: npm --prefix tests/compat install --no-audit --no-fund
       - run: npx playwright install --with-deps chromium firefox
+        env:
+          # Runner image is ubuntu 26.04, which Playwright 1.56 does not support; use its 24.04 builds.
+          PLAYWRIGHT_HOST_PLATFORM_OVERRIDE: ubuntu24.04-x64
         working-directory: packages/mabr-route-proxy/tests/compat
       - run: node tests/compat/matrix.mjs
+        env:
+          PLAYWRIGHT_HOST_PLATFORM_OVERRIDE: ubuntu24.04-x64
       - uses: actions/upload-artifact@v4
         if: always()
         with:
