@@ -230,9 +230,21 @@ export function installTransparentAdapter(target: AdapterTarget, options: Transp
     // Missed XHRs still waiting to be observed. A player (hls.js) consumes the response at
     // readystatechange(4), before `load`, and issues segment requests from there; so any
     // later send() first learns from completed ones, whatever order handlers ran in.
-    const unobserved = new Map<XMLHttpRequest, () => void>();
+    interface Unobserved {
+      learn: () => void;
+      loadend: () => void;
+    }
+    const unobserved = new Map<XMLHttpRequest, Unobserved>();
+    const forget = (xhr: XMLHttpRequest, entry: Unobserved): void => {
+      if (unobserved.get(xhr) !== entry) return;
+      unobserved.delete(xhr);
+      xhr.removeEventListener('load', entry.learn);
+      xhr.removeEventListener('loadend', entry.loadend);
+    };
     proto.open = function(this: XMLHttpRequest, method: string, url: string | URL, ...rest: unknown[]) {
       sendToken.delete(this);
+      const previous = unobserved.get(this);
+      if (previous) forget(this, previous);
       try {
         meta.set(this, { method: String(method).toUpperCase(), url: new URL(String(url), g.location.href).href, async: rest[0] !== false, headers: [] });
       } catch { meta.delete(this); }
@@ -254,7 +266,7 @@ export function installTransparentAdapter(target: AdapterTarget, options: Transp
       return abort.call(this);
     };
     proto.send = function(this: XMLHttpRequest, body?: Document | XMLHttpRequestBodyInit | null) {
-      for (const [x, learn] of unobserved) if (x.readyState === 4) learn();
+      for (const [x, entry] of unobserved) if (x.readyState === 4) entry.learn();
       const m = meta.get(this);
       const xhr = this;
       if (!m) return send.call(xhr, body);
@@ -297,9 +309,9 @@ export function installTransparentAdapter(target: AdapterTarget, options: Transp
         if (served || cancelled()) return;
         pending.delete(xhr);
         // Miss: send the original request. Observe a manifest/CORS grant on completion.
+        let entry!: Unobserved;
         const learn = () => {
-          unobserved.delete(xhr);
-          xhr.removeEventListener('load', learn);
+          forget(xhr, entry);
           try {
             if (xhr.status < 200 || xhr.status >= 300) return;
             const body = xhr.responseType === 'arraybuffer' && xhr.response instanceof ArrayBuffer
@@ -313,9 +325,11 @@ export function installTransparentAdapter(target: AdapterTarget, options: Transp
             }), 'xhr', body);
           } catch { /* best effort */ }
         };
-        unobserved.set(xhr, learn);
+        const loadend = () => forget(xhr, entry);
+        entry = { learn, loadend };
+        unobserved.set(xhr, entry);
         xhr.addEventListener('load', learn);
-        xhr.addEventListener('loadend', () => unobserved.delete(xhr), { once: true });
+        xhr.addEventListener('loadend', loadend, { once: true });
         flush();
       }, () => { counts.errors++; if (cancelled()) return; pending.delete(xhr); flush(); });
     } as unknown as typeof proto.send;

@@ -578,3 +578,43 @@ for (const mode of ['onreadystatechange', 'load-listener-before-send'] as const)
     assert.ok(sent[1]!.startsWith('blob:'), `segment went to network: ${sent.join(', ')}`);
   });
 }
+
+test('adapter: reopening an XHR clears the previous miss observation', async () => {
+  const trustedUrls: string[] = [];
+  class ReusedXhr extends EventTarget {
+    static sent: ReusedXhr[] = [];
+    responseType = ''; status = 0; response: unknown = null; readyState = 0; url = '';
+    open(_method: string, url: string) { this.url = url; this.readyState = 1; }
+    setRequestHeader() {}
+    getResponseHeader(n: string) { return n === 'content-type' ? 'application/dash+xml' : null; }
+    abort() {}
+    send() { ReusedXhr.sent.push(this); }
+    complete(body: string) {
+      this.status = 200; this.response = body; this.readyState = 4;
+      this.dispatchEvent(new Event('readystatechange'));
+      this.dispatchEvent(new Event('load'));
+      this.dispatchEvent(new Event('loadend'));
+    }
+  }
+  const g = {
+    fetch: (async () => new Response('network')) as typeof fetch,
+    location: { href: `${DS}/page.html`, origin: DS },
+    XMLHttpRequest: ReusedXhr,
+  } as unknown as AdapterGlobal;
+  const adapter = installTransparentAdapter({
+    resolve: async () => undefined,
+    inScope: () => true,
+    trustManifest: (url, body) => { trustedUrls.push(`${url}:${new TextDecoder().decode(body)}`); return true; },
+  }, { global: g });
+  const xhr = new ReusedXhr();
+  xhr.open('GET', `${DS}/live/a.mpd`); xhr.send();
+  await tick();
+  xhr.open('GET', `${DS}/live/b.mpd`); xhr.send();
+  await tick();
+  assert.equal(ReusedXhr.sent.length, 2);
+  ReusedXhr.sent[1]!.complete('<MPD>B</MPD>');
+  ReusedXhr.sent[0]!.complete('<MPD>A</MPD>');
+  await tick();
+  assert.deepEqual(trustedUrls, [`${DS}/live/b.mpd:<MPD>B</MPD>`]);
+  adapter.restore();
+});
