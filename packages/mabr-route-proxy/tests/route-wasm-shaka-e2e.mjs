@@ -610,7 +610,8 @@ try {
     // service id; every multicast join came from the SLT and its S-TSID.
     const configured = JSON.parse(state.sessionOptions);
     assert.deepEqual(Object.keys(configured).sort(), ['discoverEndpoints', 'ingress', 'serviceId', 'sltUrl', 'transparent']);
-    assert.doesNotMatch(state.sessionOptions, /\b\d{1,3}(?:\.\d{1,3}){3}\b/, 'page options carry an IP literal');
+    // The page origin is the test server's own 127.0.0.1 address; strip it so only multicast addressing could match.
+    assert.doesNotMatch(state.sessionOptions.replaceAll(`http://127.0.0.1:${port}`, 'DS'), /\b\d{1,3}(?:\.\d{1,3}){3}\b/, 'page options carry an IP literal');
     assert.ok(after.includes(format === 'hls' ? '/slt/8' : '/slt/7'), `${player}/${format}: SLT was not fetched over HTTP`);
     assert.deepEqual(state.gatewayConfigs.map(({ group, source }) => [group, source]), [
       [slsFixture.slsGroup, slsFixture.slsSource],
