@@ -435,6 +435,28 @@ test('adapter: xhr abort during the ROUTE lookup cancels the request (hit and mi
   adapter.restore();
 });
 
+test('adapter: xhr aborted during lookup then re-sent completes once (hit and miss)', async () => {
+  FakeXhr.sent = [];
+  const s = setup();
+  (s.g as { XMLHttpRequest?: unknown }).XMLHttpRequest = FakeXhr;
+  s.adapter.restore();
+  const adapter = installTransparentAdapter(s.proxy, { global: s.g });
+  s.proxy.put({ url: seg(1), data: Uint8Array.of(104, 105), contentType: 'video/mp4' });
+  await trusted(s);
+  for (const url of [seg(1), `${DS}/live/other.bin`]) {
+    FakeXhr.sent = [];
+    const xhr = new FakeXhr();
+    let loads = 0;
+    xhr.addEventListener('load', () => { loads++; });
+    xhr.open('GET', url); xhr.send(); xhr.abort();
+    xhr.open('GET', url); xhr.send();
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(loads, 1, `re-sent request loads once: ${url}`);
+    assert.equal(FakeXhr.sent.length, 1, `exactly one request: ${url}`);
+  }
+  adapter.restore();
+});
+
 test('compat: injected in-scope object is not served', async () => {
   const s = setup();
   s.proxy.put({ url: seg(1), data: Uint8Array.of(1), contentType: 'video/mp4' });

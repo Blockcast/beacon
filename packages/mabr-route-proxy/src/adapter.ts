@@ -194,10 +194,11 @@ export function installTransparentAdapter(target: AdapterTarget, options: Transp
     const proto = XHR.prototype;
     const { open, send, setRequestHeader, abort } = proto;
     const pending = new WeakSet<XMLHttpRequest>(); // sent by the page, awaiting the async ROUTE lookup
-    const aborted = new WeakSet<XMLHttpRequest>();
+    const sendToken = new WeakMap<XMLHttpRequest, object>(); // identifies the current send; abort/open invalidate it so a stale lookup cannot act
     interface XhrMeta { method: string; url: string; async: boolean; headers: Array<[string, string]>; }
     const meta = new WeakMap<XMLHttpRequest, XhrMeta>();
     proto.open = function(this: XMLHttpRequest, method: string, url: string | URL, ...rest: unknown[]) {
+      sendToken.delete(this);
       try {
         meta.set(this, { method: String(method).toUpperCase(), url: new URL(String(url), g.location.href).href, async: rest[0] !== false, headers: [] });
       } catch { meta.delete(this); }
@@ -212,7 +213,7 @@ export function installTransparentAdapter(target: AdapterTarget, options: Transp
     proto.abort = function(this: XMLHttpRequest) {
       // During the lookup the real XHR is still unsent, so native abort() is a no-op: cancel it here.
       if (pending.delete(this)) {
-        aborted.add(this);
+        sendToken.delete(this);
         this.dispatchEvent(new Event('abort')); this.dispatchEvent(new Event('loadend'));
         return;
       }
@@ -232,12 +233,15 @@ export function installTransparentAdapter(target: AdapterTarget, options: Transp
         url: m.url, method: 'GET', headers, mode: 'cors', destination: '',
         credentials: xhr.withCredentials ? 'include' : 'same-origin', cache: noCache ? 'no-store' : 'default',
       };
+      const token = {};
+      sendToken.set(xhr, token);
+      const cancelled = () => sendToken.get(xhr) !== token;
       pending.add(xhr);
       safeServe(info).then((response) => {
-        if (aborted.has(xhr)) return true;
+        if (cancelled()) return true;
         if (!response || (response.status !== 200 && response.status !== 206)) return false;
         return response.blob().then((blob) => {
-          if (aborted.has(xhr)) return true;
+          if (cancelled()) return true;
           pending.delete(xhr);
           const blobUrl = URL.createObjectURL(blob);
           xhr.addEventListener('loadend', () => URL.revokeObjectURL(blobUrl), { once: true });
@@ -255,7 +259,7 @@ export function installTransparentAdapter(target: AdapterTarget, options: Transp
           return true;
         });
       }).then((served) => {
-        if (served || aborted.has(xhr)) return;
+        if (served || cancelled()) return;
         pending.delete(xhr);
         // Miss: send the original request. Observe a manifest/CORS grant on completion.
         xhr.addEventListener('load', () => {
@@ -268,7 +272,7 @@ export function installTransparentAdapter(target: AdapterTarget, options: Transp
           } catch { /* best effort */ }
         }, { once: true });
         flush();
-      }, () => { counts.errors++; pending.delete(xhr); if (!aborted.has(xhr)) flush(); });
+      }, () => { counts.errors++; if (cancelled()) return; pending.delete(xhr); flush(); });
     } as unknown as typeof proto.send;
     restoreXhr.push(() => { proto.open = open; proto.send = send; proto.setRequestHeader = setRequestHeader; proto.abort = abort; });
   }
