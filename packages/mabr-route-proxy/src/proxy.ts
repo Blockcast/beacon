@@ -184,18 +184,31 @@ export class MabrRouteProxy {
     return () => subscription.removeEventListener('bytes', listener);
   }
 
+  /**
+   * Mechanism-neutral resolver: the cached Response for a request, or
+   * undefined when the caller must use the network (miss, out-of-scope,
+   * no-store/reload, non GET/HEAD). Hit/miss telemetry fires here.
+   */
+  async resolve(input: RequestInfo | URL, init?: RequestInit): Promise<Response | undefined> {
+    return this.#resolve(new Request(input, init));
+  }
+
   async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     const request = new Request(input, init);
+    return (await this.#resolve(request)) ?? this.#networkFetch(request);
+  }
+
+  async #resolve(request: Request): Promise<Response | undefined> {
     // A request that bypasses caches (DS discovery sends no-store) must not
     // be answered by objects that arrived on unauthenticated multicast.
     if ((request.method !== 'GET' && request.method !== 'HEAD') ||
-        request.cache === 'no-store' || request.cache === 'reload') return this.#networkFetch(request);
+        request.cache === 'no-store' || request.cache === 'reload') return undefined;
     const url = new URL(request.url, this.#baseUrl).href;
     const hit = this.#entries.get(url);
     if (!hit) {
       this.#misses++;
       this.#report({ url, method: request.method, outcome: 'miss', transport: 'network' });
-      return this.#networkFetch(request);
+      return undefined;
     }
     this.#hits++;
     this.#report({ url, method: request.method, outcome: 'hit', transport: 'route' });
