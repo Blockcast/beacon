@@ -69,10 +69,10 @@ test('reports ROUTE hits and unicast fallback misses', async () => {
     proxy.put({ url: 'seg.m4s', data: Uint8Array.of(1, 2) });
     assert.equal(await (await proxy.fetch('https://player.test/live/seg.m4s')).status, 200);
     assert.equal(await (await proxy.fetch('https://player.test/live/missing.m4s')).text(), 'origin');
-    assert.deepEqual(proxy.stats, { hits: 1, misses: 1 });
+    assert.deepEqual([proxy.stats.hits, proxy.stats.misses], [1, 1]);
     assert.deepEqual(events, [
-      { url: 'https://player.test/live/seg.m4s', method: 'GET', outcome: 'hit', transport: 'route' },
-      { url: 'https://player.test/live/missing.m4s', method: 'GET', outcome: 'miss', transport: 'network' },
+      { url: 'https://player.test/live/seg.m4s', method: 'GET', outcome: 'hit', transport: 'route', status: 200 },
+      { url: 'https://player.test/live/missing.m4s', method: 'GET', outcome: 'miss', transport: 'network', reason: 'no-entry' },
     ]);
   } finally {
     globalThis.fetch = originalFetch;
@@ -88,10 +88,10 @@ test('reports HEAD and range hits without treating them as misses', async () => 
   proxy.put({ url: 'seg.m4s', data: Uint8Array.of(1, 2, 3) });
   assert.equal((await proxy.fetch('https://player.test/live/seg.m4s', { method: 'HEAD' })).status, 200);
   assert.equal((await proxy.fetch('https://player.test/live/seg.m4s', { headers: { range: 'bytes=1-2' } })).status, 206);
-  assert.deepEqual(proxy.stats, { hits: 2, misses: 0 });
+  assert.deepEqual([proxy.stats.hits, proxy.stats.misses], [2, 0]);
   assert.deepEqual(events, [
-    { url: 'https://player.test/live/seg.m4s', method: 'HEAD', outcome: 'hit', transport: 'route' },
-    { url: 'https://player.test/live/seg.m4s', method: 'GET', outcome: 'hit', transport: 'route' },
+    { url: 'https://player.test/live/seg.m4s', method: 'HEAD', outcome: 'hit', transport: 'route', status: 200 },
+    { url: 'https://player.test/live/seg.m4s', method: 'GET', outcome: 'hit', transport: 'route', status: 206, range: 'bytes=1-2' },
   ]);
 });
 
@@ -202,7 +202,7 @@ test('resolves against baseUrl, caches only under scope and drops entries on res
     assert.deepEqual([...new Uint8Array(await (await proxy.fetch('https://ds.test/live/seg-1.m4s')).arrayBuffer())], [1]);
     assert.equal(await (await proxy.fetch('https://ds.test/live/seg-1.m4s', { cache: 'no-store' })).text(), 'network');
     assert.equal(await (await proxy.fetch('https://ds.test/live/seg-1.m4s', { cache: 'reload' })).text(), 'network');
-    assert.deepEqual(proxy.stats, { hits: 1, misses: 0 });
+    assert.deepEqual([proxy.stats.hits, proxy.stats.misses], [1, 0]);
     proxy[rescope]('https://ds.test/', 'https://ds.test/vod/');
     assert.equal(proxy.size, 0);
   } finally {
