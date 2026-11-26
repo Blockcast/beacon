@@ -288,6 +288,39 @@ each have the test named in the threat model. Not built, so their tests are
 permission contract for the future extension packaging; there is no extension
 loader yet.
 
+## Compatibility matrix for transparent interception
+
+`tests/compat/matrix.mjs` loads unmodified Shaka, hls.js and dash.js from their
+npm builds and plays a VP9 CMAF stream from ordinary DS URLs while the
+transparent adapter is installed. Each cell asserts the player buffers media,
+adapter `hits > 0`, no media request reached the network, and the four
+`compat:` tests of the threat model (§5): discovery (`no-store`) bypasses
+ROUTE, a non-media destination reaches the network, an injected or overwritten
+in-scope object is not served, and a forced adapter failure still plays over
+unicast. Every cell runs same-origin and cross-origin (CORS) segments. Run it
+with `npm run test:compat`.
+
+Claimed (headless in CI, `.github/workflows/mabr-route-proxy-compat.yml`):
+
+| Player | Formats | Chromium | Firefox |
+|---|---|---|---|
+| Shaka | DASH, HLS | yes | yes |
+| hls.js | HLS | yes | yes |
+| dash.js | DASH | yes | yes |
+
+Unsupported combinations (not tested, not claimed):
+
+| Combination | Why |
+|---|---|
+| hls.js x DASH | hls.js plays HLS only |
+| dash.js x HLS | dash.js plays DASH only |
+| webkit (Safari engine) | Playwright's Linux WebKit is not Safari, and Safari needs the separate Web Extension build ADR 0001 defers; no CI cell can stand in for it |
+| Safari native HLS | native `<video src=*.m3u8>` bypasses page `fetch`/XHR, so the page-world adapter cannot see its requests |
+
+Not covered here: real `route.wasm` bytes (the pim lane does that), H.264/AAC
+(the CI browsers ship without proprietary codecs, so media is VP9), and the
+Service Worker or extension packaging.
+
 ## Choosing the packet source
 
 `createRouteGateway()` takes each ROUTE leg from the user agent's own
