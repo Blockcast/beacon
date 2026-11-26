@@ -48,7 +48,8 @@ export function respond(
   if (!range || req.ifRange) return full();
   if (range.includes(',')) return full();
   const m = /^bytes=(\d*)-(\d*)$/.exec(range);
-  if (!m || (m[1] === '' && m[2] === '')) return unsatisfiable();
+  // RFC 9110 §14.2: unknown unit or invalid syntax is ignored (200); only a valid-but-unsatisfiable range is 416.
+  if (!m || (m[1] === '' && m[2] === '')) return full();
   let start: number;
   let end: number;
   if (m[1] === '') {
@@ -58,8 +59,9 @@ export function respond(
     end = size - 1;
   } else {
     start = Number(m[1]);
-    end = m[2] === '' ? size - 1 : Number(m[2]);
-    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end || start >= size) return unsatisfiable();
+    end = m[2] === '' ? Infinity : Number(m[2]);
+    if (!Number.isSafeInteger(start) || (m[2] !== '' && (!Number.isSafeInteger(end) || start > end))) return full();
+    if (start >= size) return unsatisfiable();
     end = Math.min(end, size - 1);
   }
   headers.set('content-range', `bytes ${start}-${end}/${size}`);

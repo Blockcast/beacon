@@ -11,7 +11,8 @@ test('range requests: a-b, a-, -n, clamp, 416, multi-range and If-Range → 200'
   assert.equal(get('bytes=8-').headers.get('content-range'), 'bytes 8-9/10');
   assert.equal(get('bytes=-3').headers.get('content-range'), 'bytes 7-9/10');
   assert.equal(get('bytes=5-99').headers.get('content-range'), 'bytes 5-9/10');
-  for (const bad of ['bytes=10-', 'bytes=4-2', 'bytes=-', 'bytes=-0', 'items=1-2', 'bytes=a-b']) {
+  for (const ignored of ['bytes=4-2', 'bytes=-', 'items=1-2', 'bytes=a-b']) assert.equal(get(ignored).status, 200, ignored);
+  for (const bad of ['bytes=10-', 'bytes=-0']) {
     const r = get(bad);
     assert.equal(r.status, 416, bad);
     assert.equal(r.headers.get('content-range'), 'bytes */10');

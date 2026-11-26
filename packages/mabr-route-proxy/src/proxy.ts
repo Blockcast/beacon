@@ -4,6 +4,8 @@
  * the URLs an ordinary DASH/HLS player already requests.
  */
 
+import { contentTypeFor, normalizeKey, respond } from './respond.ts';
+
 export interface RoutePayload {
   /** ROUTE TOI as emitted by the existing parser (preserve uint64 as bigint/string). */
   toi: bigint | number | string;
@@ -91,8 +93,6 @@ export interface MabrRouteProxyOptions {
 /** Session hook, not exported from the package: rebase and rescope the cache. */
 export const rescope = Symbol('mabr-route-proxy.rescope');
 
-import { contentTypeFor, normalizeKey, respond } from './respond.ts';
-
 function bytes(data: ArrayBuffer | ArrayBufferView): ArrayBuffer {
   if (data instanceof ArrayBuffer) return data.slice(0);
   return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
@@ -172,7 +172,7 @@ export class MabrRouteProxy {
     const url = normalizeKey(segment.url, this.#baseUrl);
     if (!url.startsWith(this.#scope)) { this.#drops['out-of-scope']++; return undefined; }
     const size = segment.data.byteLength;
-    if (size > this.#maxObjectBytes || size > this.#maxBytes) { this.#drops['over-budget']++; return undefined; }
+    if (size > this.#maxObjectBytes || size > this.#maxBytes) { this.#remove(url); this.#drops['over-budget']++; return undefined; }
     this.#remove(url);
     this.#entries.set(url, { body: bytes(segment.data), type: segment.contentType || contentTypeFor(url) });
     this.#bytes += size;
