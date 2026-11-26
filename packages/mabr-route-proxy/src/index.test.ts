@@ -209,3 +209,36 @@ test('resolves against baseUrl, caches only under scope and drops entries on res
     globalThis.fetch = original;
   }
 });
+
+test('resolve() and fetch() agree for hit, miss, out-of-scope and no-store', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response('origin')) as typeof fetch;
+  try {
+    const events: string[] = [];
+    const proxy = new MabrRouteProxy({ baseUrl: 'https://player.test/live/', onCacheEvent: (e) => events.push(e.outcome) });
+    proxy.put({ url: 'seg.m4s', data: Uint8Array.of(1, 2, 3) });
+    const cases: [string, RequestInit | undefined, boolean][] = [
+      ['https://player.test/live/seg.m4s', undefined, true],
+      ['https://player.test/live/seg.m4s', { headers: { range: 'bytes=1-2' } }, true],
+      ['https://player.test/live/missing.m4s', undefined, false],
+      ['https://other.test/live/seg.m4s', undefined, false],
+      ['https://player.test/live/seg.m4s', { cache: 'no-store' }, false],
+      ['https://player.test/live/seg.m4s', { cache: 'reload' }, false],
+    ];
+    for (const [url, init, hit] of cases) {
+      const resolved = await proxy.resolve(url, init);
+      assert.equal(resolved !== undefined, hit, url);
+      const fetched = await proxy.fetch(url, init);
+      if (resolved) {
+        assert.equal(fetched.status, resolved.status);
+        assert.deepEqual([...new Uint8Array(await fetched.arrayBuffer())], [...new Uint8Array(await resolved.arrayBuffer())]);
+      } else assert.equal(await fetched.text(), 'origin');
+    }
+    // Both entry points fire telemetry (no-store/reload fire none): 4 reportable cases x 2 calls.
+    assert.equal(events.length, 8);
+    assert.equal(proxy.stats.hits, 4);
+    assert.equal(proxy.stats.misses, 4);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

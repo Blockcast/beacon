@@ -9,10 +9,15 @@ export type {
   RouteCacheStats,
   RouteDropReason,
   RouteSegment,
+  TransparentPolicy,
 } from './proxy.ts';
+export { installTransparentAdapter } from './adapter.ts';
+export type { AdapterStatus, TransparentAdapter, TransparentAdapterOptions, AdapterTarget } from './adapter.ts';
 
+export { isInit } from './manifest-names.ts';
 export { contentTypeFor, normalizeKey, respond } from './respond.ts';
 export type { RouteReply } from './respond.ts';
+
 
 export { RouteMabrSession, RouteRaptorQCollector, createRouteMabrSession, discoverSlsEndpoint } from './route.ts';
 export type {
@@ -29,6 +34,37 @@ export type {
   RouteWasmExports,
   RouteWasmHandle,
 } from './route.ts';
+
+export {
+  DEFAULT_ROUTE_POLICY_VERSION,
+  ShakaRouteHealthAdapter,
+  createShakaRouteHealthAdapter,
+  extractShakaRenditionBindings,
+  formatRouteHealthDiagnostic,
+  inferRoutePlaybackFormat,
+  mapRouteHealthToShakaRenditions,
+  matchRouteTemplate,
+  normalizeRoutePolicySnapshot,
+  normalizeRouteTransport,
+  routeTransportLabel,
+  routeTemplateRegExp,
+} from './route-health.ts';
+export type {
+  RouteHealthDiagnostic,
+  RouteHealthProvider,
+  RouteHealthState,
+  RouteHealthApplyResult,
+  RoutePlaybackFormat,
+  RoutePolicyContext,
+  RoutePolicyDecision,
+  RoutePolicySnapshot,
+  RouteRenditionHealth,
+  RouteRenditionMapping,
+  RouteTransport,
+  ShakaRenditionBinding,
+  ShakaRouteHealthAdapterOptions,
+  ShakaRoutePlayer,
+} from './route-health.ts';
 
 export { createMulticastReceiverGateway, createRouteGateway } from './gateway.ts';
 export type { RouteProvider } from './gateway.ts';

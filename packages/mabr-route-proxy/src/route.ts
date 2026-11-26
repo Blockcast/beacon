@@ -4,6 +4,7 @@ import {
   type ByteSubscription,
   type RouteCacheEvent,
   type RouteCacheStats,
+  type TransparentPolicy,
 } from './proxy.ts';
 
 export interface RouteWasmExports {
@@ -198,6 +199,13 @@ export interface RouteMabrOptions {
   onObject?: (object: RouteObject) => void;
   /** Optional browser-side RFC 6330 recovery for the parser's symbol queue. */
   raptorq?: RouteRaptorQOptions;
+  /**
+   * Harden the cache for transparent interception (see `installTransparentAdapter`).
+   * Scope then comes only from explicit config or the HTTPS SLT
+   * `PresentationManifest` (R1), nothing is cached before scope is set (R3),
+   * and a missing `route_pop_completed_integrity` export counts as incomplete (R12).
+   */
+  transparent?: TransparentPolicy;
 }
 
 const decoder = new TextDecoder();
@@ -780,7 +788,7 @@ export class RouteRaptorQCollector {
   }
 }
 
-function drain(exports: RouteWasmExports, onObject: (object: RouteObject) => void): void {
+function drain(exports: RouteWasmExports, onObject: (object: RouteObject) => void, missingIntegrity = 100): void {
   for (let remaining = exports.route_get_completed_count(); remaining > 0; remaining--) {
     try {
       const length = exports.route_pop_completed_len();
@@ -788,7 +796,7 @@ function drain(exports: RouteWasmExports, onObject: (object: RouteObject) => voi
         tsi: uint64(exports.route_pop_completed_tsi()),
         toi: uint64(exports.route_pop_completed_toi()),
         codepoint: exports.route_pop_completed_codepoint(),
-        integrity: exports.route_pop_completed_integrity?.() ?? 100,
+        integrity: exports.route_pop_completed_integrity?.() ?? missingIntegrity,
         contentType: readString(
           exports,
           exports.route_pop_completed_type?.(),
@@ -900,6 +908,11 @@ export class RouteMabrSession {
     });
   }
   installFetch(): () => void { return this.#proxy.installFetch(); }
+  /** The cached Response for a request, or undefined when the caller must use the network. */
+  resolve(input: RequestInfo | URL, init?: RequestInit): Promise<Response | undefined> { return this.#proxy.resolve(input, init); }
+  /** Record a manifest the player loaded over unicast as trusted; see `MabrRouteProxy.trustManifest`. */
+  trustManifest(url: string, body: ArrayBuffer | ArrayBufferView): boolean { return this.#proxy.trustManifest(url, body); }
+  inScope(url: string): boolean { return this.#proxy.inScope(url); }
   async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> { return this.#proxy.fetch(input, init); }
 
   async start(): Promise<void> {
@@ -988,7 +1001,7 @@ export class RouteMabrSession {
             exports.route_process_udp(groupBytes.length, endpoint.port, payload.length);
           }
           drainRaptorQ(exports, this.#raptorq);
-          drain(exports, (object) => this.#ingest(object));
+          drain(exports, (object) => this.#ingest(object), this.#options.transparent ? 0 : 100);
           this.#ingestManifest(exports);
           if (discoverEndpoints && group === slsGroup) {
             this.#queueSlsDiscovery(slsGroup, generation, exports, subscribeEndpoint);
@@ -1162,7 +1175,9 @@ export class RouteMabrSession {
         exports.route_sls_manifest_location && exports.route_sls_manifest_location_len &&
         Number.isSafeInteger(count) && count > 0) {
       const manifests: Array<{ location: string; data: Uint8Array; rank?: number }> = [];
-      const deriveManifest = !this.#manifestUrl && (this.#options.sltUrl !== undefined ||
+      // R1: under a transparent adapter a multicast-carried manifest location
+      // never sets or widens the scope; only config or the HTTPS SLT does.
+      const deriveManifest = !this.#options.transparent && !this.#manifestUrl && (this.#options.sltUrl !== undefined ||
         this.#options.baseUrl !== undefined || this.#options.scope !== undefined);
       for (let index = 0; index < count; index++) {
         const bodyPointer = exports.route_sls_manifest(index);
