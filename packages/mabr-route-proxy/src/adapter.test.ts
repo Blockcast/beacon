@@ -610,3 +610,46 @@ test('adapter: fetch segment issued from XHR playlist readystatechange(4) is ser
   assert.deepEqual([...new Uint8Array(await res.arrayBuffer())], [1]);
   assert.equal(network, 0);
 });
+
+test('adapter: reopening an XHR clears the previous miss observation', async () => {
+  const trustedUrls: string[] = [];
+  class ReusedXhr extends EventTarget {
+    static completions: Array<() => void> = [];
+    responseType = ''; status = 0; response: unknown = null; readyState = 0; url = '';
+    open(_method: string, url: string) { this.url = url; this.readyState = 1; }
+    setRequestHeader() {}
+    getResponseHeader(n: string) { return n === 'content-type' ? 'application/dash+xml' : null; }
+    abort() {}
+    send() {
+      const body = this.url.endsWith('/a.mpd') ? '<MPD>A</MPD>' : '<MPD>B</MPD>';
+      ReusedXhr.completions.push(() => this.complete(body));
+    }
+    complete(body: string) {
+      this.status = 200; this.response = body; this.readyState = 4;
+      this.dispatchEvent(new Event('readystatechange'));
+      this.dispatchEvent(new Event('load'));
+      this.dispatchEvent(new Event('loadend'));
+    }
+  }
+  const g = {
+    fetch: (async () => new Response('network')) as typeof fetch,
+    location: { href: `${DS}/page.html`, origin: DS },
+    XMLHttpRequest: ReusedXhr,
+  } as unknown as AdapterGlobal;
+  const adapter = installTransparentAdapter({
+    resolve: async () => undefined,
+    inScope: () => true,
+    trustManifest: (url, body) => { trustedUrls.push(`${url}:${new TextDecoder().decode(body)}`); return true; },
+  }, { global: g });
+  const xhr = new ReusedXhr();
+  xhr.open('GET', `${DS}/live/a.mpd`); xhr.send();
+  await tick();
+  xhr.open('GET', `${DS}/live/b.mpd`); xhr.send();
+  await tick();
+  assert.equal(ReusedXhr.completions.length, 2);
+  ReusedXhr.completions[1]!();
+  ReusedXhr.completions[0]!();
+  await tick();
+  assert.deepEqual(trustedUrls, [`${DS}/live/b.mpd:<MPD>B</MPD>`]);
+  adapter.restore();
+});
