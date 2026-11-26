@@ -1,0 +1,49 @@
+name: mabr-route-proxy compat matrix
+
+# BLO-59460: unmodified Shaka / hls.js / dash.js x Chromium / Firefox x DASH /
+# HLS x same- and cross-origin segments, asserting ROUTE hits > 0 with no player
+# or page-code change. Unsupported combinations are listed in the package README.
+on:
+  pull_request:
+    paths:
+      - 'packages/mabr-route-proxy/**'
+      - '.github/workflows/mabr-route-proxy-compat.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'packages/mabr-route-proxy/**'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  compat-matrix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: packages/mabr-route-proxy
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install ffmpeg (VP9 test media)
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+        working-directory: .
+      - run: npm install --no-audit --no-fund
+      - run: npm run build
+      - run: npm --prefix tests/compat install --no-audit --no-fund
+      - run: npx playwright install --with-deps chromium firefox
+        working-directory: packages/mabr-route-proxy/tests/compat
+      - run: node tests/compat/matrix.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: compat-matrix-results
+          path: packages/mabr-route-proxy/tests/compat/compat-matrix-results.json
