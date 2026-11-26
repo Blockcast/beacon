@@ -140,7 +140,7 @@ export function installTransparentAdapter(target: AdapterTarget, options: Transp
   }
 
   /** After a unicast response: learn trusted manifests (R8) and CORS grants (R17). Never throws. */
-  function observe(info: RequestInfoLite, response: Response | undefined, kind: 'fetch' | 'xhr'): void {
+  async function observe(info: RequestInfoLite, response: Response | undefined, kind: 'fetch' | 'xhr', knownBody?: ArrayBuffer): Promise<void> {
     try {
       if (!response || !response.ok || info.method !== 'GET') return;
       const url = new URL(info.url);
@@ -152,10 +152,14 @@ export function installTransparentAdapter(target: AdapterTarget, options: Transp
       if (!secureTransport(url) || (target.inScope && !target.inScope(url.href))) return;
       const length = Number(response.headers.get('content-length') ?? 0);
       if (length > MAX_MANIFEST_BYTES) return;
-      response.clone().arrayBuffer().then((body) => {
-        // A trust failure only means ROUTE answers less; it must not surface as a page error (R22).
-        try { if (body.byteLength <= MAX_MANIFEST_BYTES) target.trustManifest!(url.href, body); } catch { counts.errors++; }
-      }, () => {});
+      // A manifest must be trusted before its player can issue the segment
+      // requests it names. Fetch can await the clone, while XHR supplies the
+      // already-read body so the trust decision is synchronous in its load
+      // event.
+      const body = knownBody ?? await response.clone().arrayBuffer();
+      if (body.byteLength <= MAX_MANIFEST_BYTES) {
+        try { target.trustManifest(url.href, body); } catch { counts.errors++; }
+      }
     } catch { /* observation is best effort */ }
   }
 
@@ -179,7 +183,7 @@ export function installTransparentAdapter(target: AdapterTarget, options: Transp
     const served = info ? await safeServe(info) : undefined;
     if (served) return served;
     const response = await origFetch.call(g, input, init); // R20: the original arguments, unchanged
-    if (info) observe(info, response, 'fetch');
+    if (info) await observe(info, response, 'fetch');
     return response;
   };
   g.fetch = patchedFetch as typeof fetch;
@@ -265,10 +269,15 @@ export function installTransparentAdapter(target: AdapterTarget, options: Transp
         xhr.addEventListener('load', () => {
           try {
             if (xhr.status < 200 || xhr.status >= 300) return;
-            observe(info, new Response(xhr.responseType === 'arraybuffer' || xhr.responseType === 'text' || xhr.responseType === '' ? xhr.response : null, {
+            const body = xhr.responseType === 'arraybuffer' && xhr.response instanceof ArrayBuffer
+              ? xhr.response
+              : xhr.responseType === 'text' || xhr.responseType === ''
+                ? new TextEncoder().encode(String(xhr.response ?? '')).buffer
+                : undefined;
+            observe(info, new Response(body ?? null, {
               status: 200,
               headers: { 'content-type': xhr.getResponseHeader('content-type') ?? '' },
-            }), 'xhr');
+            }), 'xhr', body);
           } catch { /* best effort */ }
         }, { once: true });
         flush();

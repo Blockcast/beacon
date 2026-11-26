@@ -169,6 +169,27 @@ test('adapter: default mode loads the manifest over unicast', async () => {
   assert.equal(s.calls.length, 1);
 });
 
+test('adapter: trusts a unicast HLS manifest before its segment request', async () => {
+  const hls = '#EXTM3U\n#EXT-X-MAP:URI="init.mp4"\n#EXTINF:2,\nhls-1.m4s\n';
+  const proxy = new MabrRouteProxy({ baseUrl: `${DS}/`, scope: `${DS}/live/`, transparent: { unauthenticatedSegments: [DS] } });
+  const calls: string[] = [];
+  const g: AdapterGlobal = {
+    location: { href: `${DS}/page.html`, origin: DS },
+    fetch: (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      calls.push(url);
+      return new Response(hls, { headers: { 'content-type': 'application/vnd.apple.mpegurl' } });
+    }) as typeof fetch,
+  };
+  const adapter = installTransparentAdapter(proxy, { global: g });
+  proxy.put({ url: `${DS}/live/init.mp4`, data: Uint8Array.of(1), contentType: 'video/mp4' });
+  proxy.put({ url: `${DS}/live/hls-1.m4s`, data: Uint8Array.of(2), contentType: 'video/mp4' });
+  await g.fetch(`${DS}/live/media.m3u8`);
+  assert.equal((await g.fetch(`${DS}/live/hls-1.m4s`)).status, 200);
+  assert.deepEqual(calls, [`${DS}/live/media.m3u8`]);
+  adapter.restore();
+});
+
 test('adapter: unverified multicast manifest falls through to unicast', async () => {
   const injected = new TextEncoder().encode('<MPD id="injected"/>');
   let verdict = false;
