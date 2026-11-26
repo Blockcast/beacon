@@ -288,6 +288,22 @@ each have the test named in the threat model. Not built, so their tests are
 permission contract for the future extension packaging; there is no extension
 loader yet.
 
+### Enabling, default, and rollback
+
+Transparent interception is **opt-in and off by default.** Upgrading from 0.2.x
+changes nothing until page or extension code calls
+`installTransparentAdapter(session)` (and, for it to serve segments, sets
+`transparent.unauthenticatedSegments`). The existing `installFetch()` /
+`proxy.fetch` / `resolve()` paths are untouched.
+
+- **Enable:** create the session with `transparent: {...}`, `await session.start()`,
+  then `installTransparentAdapter(session)` before the player is created.
+- **Disable at runtime:** call `adapter.restore()`, or
+  reload the page; the adapter restores the original `fetch`/XHR.
+- **Roll back:** remove the `installTransparentAdapter()` call (or the
+  `transparent` option). To roll back the package, pin `@blockcast/mabr-route-proxy`
+  to `0.2.3`, the previous published version.
+
 ## Compatibility matrix for transparent interception
 
 `tests/compat/matrix.mjs` loads unmodified Shaka, hls.js and dash.js from their
