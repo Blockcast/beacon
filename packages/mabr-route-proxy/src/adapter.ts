@@ -139,6 +139,25 @@ export function installTransparentAdapter(target: AdapterTarget, options: Transp
     try { return await serve(info); } catch { counts.errors++; record(false); return undefined; }
   }
 
+  /** Read a body but stop and return undefined once it exceeds `cap`, so a chunked response without Content-Length is never buffered unbounded. */
+  async function readCapped(r: Response, cap: number): Promise<ArrayBuffer | undefined> {
+    if (!r.body) return r.arrayBuffer();
+    const reader = r.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let n = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      n += value.byteLength;
+      if (n > cap) { reader.cancel().catch(() => {}); return undefined; } // not awaited: a tee branch's cancel settles only when the player's branch also ends
+      chunks.push(value);
+    }
+    const out = new Uint8Array(n);
+    let o = 0;
+    for (const c of chunks) { out.set(c, o); o += c.byteLength; }
+    return out.buffer;
+  }
+
   /** After a unicast response: learn trusted manifests (R8) and CORS grants (R17). Never throws. */
   async function observe(info: RequestInfoLite, response: Response | undefined, kind: 'fetch' | 'xhr', knownBody?: ArrayBuffer): Promise<void> {
     try {
@@ -156,8 +175,8 @@ export function installTransparentAdapter(target: AdapterTarget, options: Transp
       // requests it names. Fetch can await the clone, while XHR supplies the
       // already-read body so the trust decision is synchronous in its load
       // event.
-      const body = knownBody ?? await response.clone().arrayBuffer();
-      if (body.byteLength <= MAX_MANIFEST_BYTES) {
+      const body = knownBody ?? await readCapped(response.clone(), MAX_MANIFEST_BYTES);
+      if (body && body.byteLength <= MAX_MANIFEST_BYTES) {
         try { target.trustManifest(url.href, body); } catch { counts.errors++; }
       }
     } catch { /* observation is best effort */ }

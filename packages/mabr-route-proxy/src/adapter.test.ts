@@ -503,3 +503,15 @@ test('adapter: HLS key and licence requests reach the network with their origina
   assert.equal(licence.bodyUsed, false);
   assert.equal(s.adapter.status().hits, 0);
 });
+
+test('adapter: a chunked manifest over the byte cap stops being read and is never trusted', async () => {
+  const trustCalls: string[] = [];
+  let pulled = 0;
+  const stream = new ReadableStream<Uint8Array>({ pull(c) { pulled++; pulled <= 16 ? c.enqueue(new Uint8Array(1 << 20)) : c.close(); } }, { highWaterMark: 0 });
+  const g: AdapterGlobal = { fetch: (async () => new Response(stream, { headers: { 'content-type': 'application/dash+xml' } })) as typeof fetch, location: { href: `${DS}/page.html`, origin: DS } };
+  installTransparentAdapter({ resolve: async () => undefined, trustManifest: (u: string) => { trustCalls.push(u); }, inScope: () => true }, { global: g });
+  await g.fetch(`${DS}/live/manifest.mpd`);
+  await tick();
+  assert.deepEqual(trustCalls, []);
+  assert.ok(pulled <= 4, `read stopped at the cap, pulled ${pulled}`);
+});

@@ -46,7 +46,7 @@ export interface RouteCacheEvent {
   /** HTTP status served (route hits only; network responses are the origin's). */
   status?: number;
   range?: string;
-  reason?: 'no-entry';
+  reason?: 'no-entry' | 'ineligible';
 }
 
 export type RouteDropReason = 'out-of-scope' | 'integrity' | 'no-location' | 'over-budget' | 'evicted';
@@ -266,6 +266,7 @@ export class MabrRouteProxy {
       // R5: first write wins; only a manifest may be refreshed (live), and it
       // still has to pass R9 before it is ever served.
       if (existing && !isManifestType(existing.type)) return url;
+      if (existing && !isManifestType(segment.contentType || contentTypeFor(url))) return url; // a non-manifest cannot displace a cached manifest
       // R6: an object over the per-object or total byte budget is dropped.
       const total = this.#bytes - (existing?.body.byteLength ?? 0) + size;
       if (size > this.#maxEntryBytes || total > this.#maxTotalBytes) { this.#drops['over-budget']++; return undefined; }
@@ -393,10 +394,11 @@ export class MabrRouteProxy {
       hit = this.#entries.get(url);
       late = hit !== undefined;
     }
-    if (hit && this.#policy && !(await this.#eligible(url, hit))) hit = undefined;
+    let reason: 'no-entry' | 'ineligible' = 'no-entry';
+    if (hit && this.#policy && !(await this.#eligible(url, hit))) { hit = undefined; reason = 'ineligible'; }
     if (!hit) {
       this.#misses++;
-      this.#report({ url, method, outcome: 'miss', transport: 'network', reason: 'no-entry', ...(range ? { range } : {}) });
+      this.#report({ url, method, outcome: 'miss', transport: 'network', reason, ...(range ? { range } : {}) });
       return undefined;
     }
     const reply = respond(hit, { method, range, ifRange: request.headers.get('if-range') });
